@@ -169,7 +169,9 @@ class Behavior:
             self._ahead = (target, now)      # it will be ahead once we've turned
             return Decision(_FACE[need], "ENGAGE", target, f"turn {need}: {where}")
         if target not in p.mobs:
-            where += " (last seen)"
+            # Only remembered (flicker hold): keep facing it, but don't cast blind --
+            # it may have died or walked past us.
+            return Decision(Action.IDLE, "ENGAGE", target, f"holding facing, {where} (last seen)")
         since = now - self._last_attack
         cd = self.settings.skill.cooldown_s
         if since >= cd:

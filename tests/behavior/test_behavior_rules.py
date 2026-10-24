@@ -227,6 +227,9 @@ def test_turned_to_target_is_held_through_flicker():
     b = make_behavior()
     assert b.decide(perc(mobs=[X - 100]), 0.0).action is A.FACE_LEFT
     d = b.decide(perc(mobs=[X + 150]), 0.07)              # left mob missed, right one seen
+    assert d.action is A.IDLE and b.facing == "left"      # hold facing, no blind cast
+    assert "last seen" in d.reason
+    d = b.decide(perc(mobs=[X - 100, X + 150]), 0.14)     # it's back
     assert d.action is A.ATTACK and b.facing == "left"
 
 
@@ -628,11 +631,13 @@ def test_off_platform_single_jitter_tick_ignored():
 
 
 def test_tolerance_edges():
+    m = onplat().map
+    assert m.on_platform(0.5, 0.4899) and m.on_platform(0.5, 0.4101)   # 0.0399 off
+    assert not m.on_platform(0.5, 0.4901) and not m.on_platform(0.5, 0.4099)
+    b = onplat()                                   # standing: decided on the first tick
+    assert b.decide(perc(map_y=0.4899), 0.0).state == "PATROL"
     b = onplat()
-    assert b.decide(perc(map_y=0.4899), 0.0).state == "PATROL"     # 0.0399 off: on
-    assert b.decide(perc(map_y=0.4101), 1.0).state == "PATROL"
-    assert b.decide(perc(map_y=0.4901), 2.0).state == "OFF_PLATFORM"   # 0.0401 off
-    assert b.decide(perc(map_y=0.4099), 3.0).state == "OFF_PLATFORM"
+    assert b.decide(perc(map_y=0.4901), 0.0).state == "OFF_PLATFORM"
 
 
 def test_off_platform_from_standstill_idles_immediately():
@@ -671,6 +676,6 @@ def test_no_patrol_y_means_no_height_check():
 
 def test_off_platform_does_not_trigger_stuck_jump():
     b = onplat(behavior__stuck_s=0.5)
-    walk_right(b)
+    assert b.decide(perc(map_y=0.45), 0.0).action is A.WALK_RIGHT
     acts = [b.decide(perc(map_y=0.8), 0.1 + i * 0.1).action for i in range(20)]
     assert A.JUMP not in acts

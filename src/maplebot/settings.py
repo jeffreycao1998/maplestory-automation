@@ -51,7 +51,7 @@ class Calibration:
     patrol_left: float = 0.30                 # minimap x fraction
     patrol_right: float = 0.70
     patrol_y: Optional[float] = None          # minimap y of the training platform (set with the edges)
-    patrol_y_tolerance: float = 0.04          # further than this from patrol_y = fell off / wrong platform
+    patrol_y_tolerance: float = 0.08          # further than this from patrol_y = fell off / wrong platform (bridges sag ~0.05-0.08; next bridge ~0.11 away)
     player_dot_hsv_low: List[int] = field(default_factory=lambda: [20, 150, 180])
     player_dot_hsv_high: List[int] = field(default_factory=lambda: [35, 255, 255])
 
