@@ -21,9 +21,17 @@ MIN_DOT_AREA_PX = 2            # blobs smaller than this are noise (single stray
 MAX_DOT_AREA_FRACTION = 0.05   # blobs bigger than 5% of the minimap are not the dot
 
 # --- hsv_range_from_sample ---------------------------------------------------------
+# The minimap dot is a small fixed-colour sprite: a bright core (V~255) with a dim
+# anti-aliased rim (V~150) and a grey outline. Only the core is used to build the range:
+# rim pixels share the dot's hue but have the same brightness as minimap scenery (on The
+# Tree That Grew II the vines are H 30-38, S ~227, V 136-170), and the party-member dot is
+# orange (H 14-21), so hue must stay tight.
 SAMPLE_RADIUS_PX = 2           # 5x5 patch around the click
-HUE_TOLERANCE = 8              # +- on OpenCV's 0..179 hue scale
-SV_LOW_FACTOR = 0.6            # lower S/V bound = 60% of the darkest/least saturated dot pixel
+CORE_HUE_DIFF = 4              # core pixels: hue within this of the brightest dot pixel...
+CORE_V_DROP = 40               # ...and V at most this far below it
+HUE_TOLERANCE = 3              # +- around the core's hue span (OpenCV 0..179 scale)
+S_LOW_FACTOR = 0.75            # lower S bound = 75% of the least saturated core pixel
+V_LOW_FACTOR = 0.80            # lower V bound = 80% of the darkest core pixel
 
 # --- bar_fill ------------------------------------------------------------------------
 BAR_FILLED_SV_THRESHOLD = 0.25  # column mean of (S/255)*(V/255) above this = filled
@@ -114,11 +122,12 @@ def minimap_player_position(image, minimap_box, hsv_low, hsv_high) -> Optional[P
 def hsv_range_from_sample(image, x: int, y: int) -> Tuple[list, list]:
     """Tolerant HSV range ([h,s,v] low, [h,s,v] high) for the dot the user clicked at (x, y).
 
-    Looks at a 5x5 patch, takes its most saturated+bright pixel as the dot colour (so a
-    click one pixel off the dot still works), keeps patch pixels of similar hue and
-    brightness, and widens: hue +-HUE_TOLERANCE, S/V lower bounds at SV_LOW_FACTOR of
-    the observed minimum, upper bounds 255. Values are clipped to OpenCV ranges
-    (H 0..179, S/V 0..255). Falls back to the Calibration defaults on bad input.
+    Looks at a 5x5 patch and takes its most saturated+bright pixel as the dot colour (so a
+    click a pixel or two off the dot still works). The dot's *core* is that pixel plus patch
+    pixels within CORE_HUE_DIFF hue and CORE_V_DROP brightness of it; the dim rim and the
+    grey outline are left out. Range = core hue span +- HUE_TOLERANCE, S >= 75% and
+    V >= 80% of the core minimum, upper S/V 255, clipped to OpenCV ranges (H 0..179,
+    S/V 0..255). Falls back to the Calibration defaults on bad input.
     """
     default = ([20, 150, 180], [35, 255, 255])
     try:
@@ -136,16 +145,16 @@ def hsv_range_from_sample(image, x: int, y: int) -> Tuple[list, list]:
         ref = hsv[int(np.argmax(sv))]
         dh = np.abs(hsv[:, 0] - ref[0])
         dh = np.minimum(dh, 180 - dh)                      # hue is circular
-        keep = hsv[(dh <= 6) & (sv >= 0.5 * sv.max())]
-        if len(keep) == 0:
-            keep = ref[None, :]
-        hues = keep[:, 0]
+        core = hsv[(dh <= CORE_HUE_DIFF) & (hsv[:, 2] >= ref[2] - CORE_V_DROP)
+                   & (sv >= 0.5 * sv.max())]
+        if len(core) == 0:
+            core = ref[None, :]
         # Hues near the wrap (red) would give min/max far apart; centre them on ref first.
-        rel = ((hues - ref[0] + 90) % 180) - 90
+        rel = ((core[:, 0] - ref[0] + 90) % 180) - 90
         h_lo = int(np.clip(ref[0] + rel.min() - HUE_TOLERANCE, 0, 179))
         h_hi = int(np.clip(ref[0] + rel.max() + HUE_TOLERANCE, 0, 179))
-        s_lo = int(np.clip(keep[:, 1].min() * SV_LOW_FACTOR, 0, 255))
-        v_lo = int(np.clip(keep[:, 2].min() * SV_LOW_FACTOR, 0, 255))
+        s_lo = int(np.clip(core[:, 1].min() * S_LOW_FACTOR, 0, 255))
+        v_lo = int(np.clip(core[:, 2].min() * V_LOW_FACTOR, 0, 255))
         return [h_lo, s_lo, v_lo], [h_hi, 255, 255]
     except Exception:
         log.exception("hsv_range_from_sample failed")

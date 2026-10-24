@@ -1,0 +1,2 @@
+dataset,frame,n_truth,n_pred,tp,fp,fn,truth_map_x,truth_map_y,pred_map_x,pred_map_y,map_x_err_pct,map_y_err_pct,truth_screen_x,truth_screen_y,pred_screen_x,pred_screen_y,screen_err_px,screen_estimated,truth_hp,pred_hp,hp_err,truth_mp,pred_mp,mp_err,confidence,flags,ms,missed_boxes,fp_boxes
+data/labeled/tree-that-grew-2,000001.png,6,4,4,0,2,0.506,0.446,0.50602,0.44643,0.002,0.043,712,451,683,476,38.3,1,0.428,0.4272,0.0008,0.03,0.0194,0.0106,1.0,,34.01,"[[750, 0, 48, 24], [398, 296, 52, 50]]",[]

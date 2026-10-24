@@ -60,9 +60,12 @@ PLAYER_ESTIMATE_Y_FRAC = 0.62
 PLAYER_COARSE_PEAKS = 3      # name-tag candidates refined at full resolution
 PLAYER_COARSE_MARGIN = 0.25  # coarse score may be this much below player_threshold
 
-COARSE_MARGIN = 0.25         # proposals need coarse gray score >= mob_threshold - this
+COARSE_MARGIN = 0.20         # proposals need coarse gray score >= mob_threshold - this (worst true mob on the real frame: 0.56 vs 0.50 cut)
 VERIFY_BLUR_SIGMA = 1.5      # Gaussian sigma (px) applied before the colour verification
-MAX_VERIFY_PER_TEMPLATE = 25 # best proposals per template variant that get verified
+VERIFY_BLUR_KSIZE = 7        # fixed kernel (~2.3 sigma each side): much faster than auto size
+# Best proposals per template variant that get verified. On the real frame true mobs rank
+# 0-2 among proposals; 10 leaves room for a crowded screen and bounds the cost (~0.3 ms each).
+MAX_VERIFY_PER_TEMPLATE = 10
 
 MIN_TEMPLATE_PX = 6         # a template smaller than this after downscaling is skipped
 MAX_CANDIDATES_PER_TEMPLATE = 200   # bound NMS work on noisy frames
@@ -121,6 +124,10 @@ def _load_bgr(path: Path) -> Optional[np.ndarray]:
 def _load_gray(path: Path) -> Optional[np.ndarray]:
     img = _load_bgr(path)
     return None if img is None else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+
+def _blur(img: np.ndarray) -> np.ndarray:
+    return cv2.GaussianBlur(img, (VERIFY_BLUR_KSIZE, VERIFY_BLUR_KSIZE), VERIFY_BLUR_SIGMA)
 
 
 def _usable_template(gray: np.ndarray) -> bool:
@@ -203,7 +210,7 @@ class Perceiver:
                 if min(g.shape[:2]) < MIN_TEMPLATE_PX or not _usable_template(g):
                     log.warning("mob template %s too small/flat at downscale %.2f; skipped", name, scale)
                     continue
-                verify = cv2.GaussianBlur(bgr, (0, 0), VERIFY_BLUR_SIGMA)
+                verify = _blur(bgr)
                 prepared.append(_Prepared(name, np.ascontiguousarray(g), verify, t.w, t.h))
         self._prepared = prepared
         self._player_small = None
@@ -320,8 +327,8 @@ class Perceiver:
         # Actual scale per axis (rounding) so coordinates map back exactly.
         fx = W_ / sw
         fy = H_ / sh
-        pad = int(np.ceil(max(fx, fy))) + 2            # search slack around a proposal
-        bpad = int(np.ceil(3 * VERIFY_BLUR_SIGMA))     # so the ROI blur has real context
+        pad = int(np.ceil(max(fx, fy))) + 1            # search slack around a proposal
+        bpad = VERIFY_BLUR_KSIZE // 2                  # so the ROI blur has real context
         coarse_th = threshold - COARSE_MARGIN
 
         cands = []   # (score, x0, y0, x1, y1, name, w, h) full-res box
@@ -344,13 +351,15 @@ class Perceiver:
                 xs, ys = xs[top], ys[top]
             for x, y in zip(xs.tolist(), ys.tolist()):
                 gx, gy = int(round(x * fx)), int(round(y * fy))     # full-res top-left guess
+                if any(_centre_in(gx + tp.w / 2.0, gy + tp.h / 2.0, b) for b in exclude):
+                    continue   # UI (minimap / bars): don't spend a verification on it
                 x0 = max(0, gx - pad - bpad)
                 y0 = max(0, gy - pad - bpad)
                 x1 = min(W_, gx + tp.w + pad + bpad)
                 y1 = min(H_, gy + tp.h + pad + bpad)
                 if x1 - x0 < tp.w or y1 - y0 < tp.h:
                     continue
-                roi = cv2.GaussianBlur(img[y0:y1, x0:x1], (0, 0), VERIFY_BLUR_SIGMA)
+                roi = _blur(img[y0:y1, x0:x1])
                 # Only accept positions within `pad` of the proposal (not in the blur margin).
                 ix0, iy0 = max(0, gx - pad - x0), max(0, gy - pad - y0)
                 ix1 = min(x1 - x0 - tp.w, gx + pad - x0)
