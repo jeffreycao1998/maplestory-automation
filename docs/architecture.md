@@ -81,7 +81,12 @@ class MapModel:
     @classmethod
     def from_settings(cls, settings: Settings) -> MapModel   # v1: single platform from patrol bounds
     patrol_left: float; patrol_right: float
+    patrol_y: float | None                     # minimap y of the bridge ends
+    patrol_y_tolerance: float                  # allowed distance BELOW patrol_y (bridges sag)
+    patrol_y_tolerance_above: float            # allowed distance ABOVE patrol_y
+    patrol_y_band: tuple[float, float] | None  # (top, bottom)
     def side_of_patrol(self, x: float) -> str  # "left_out" | "inside" | "right_out"
+    def on_platform(self, x: float | None, y: float | None) -> bool   # True if patrol_y unset
 
 # maplebot/behavior/__init__.py
 class Behavior:
