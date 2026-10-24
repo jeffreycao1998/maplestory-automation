@@ -67,6 +67,7 @@ class Potions:
     hp_below: float = 0.50
     mp_below: float = 0.30
     cooldown_s: float = 1.5
+    tap_s: float = 0.05
 
 
 @dataclass
@@ -74,6 +75,7 @@ class Behavior:
     loop_hz: float = 15.0
     stuck_s: float = 2.5       # walking but minimap x not changing -> jump
     turn_tap_s: float = 0.05
+    jump_tap_s: float = 0.05
 
 
 @dataclass
@@ -129,6 +131,18 @@ class Settings:
             out.append("Patrol left edge must be left of the right edge")
         if not self.keys.attack:
             out.append("Attack key not set")
+        try:
+            from .controls import normalize_key
+        except Exception:      # controls unavailable: skip key validation
+            return out
+        for name in ("attack", "jump", "left", "right", "hp_potion", "mp_potion"):
+            value = getattr(self.keys, name)
+            if not value:
+                continue
+            try:
+                normalize_key(value)
+            except ValueError:
+                out.append(f"{name.replace('_', ' ').capitalize()} key '{value}' isn't a key the bot knows")
         return out
 
 
