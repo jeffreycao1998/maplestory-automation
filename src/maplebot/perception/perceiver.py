@@ -4,12 +4,21 @@ Frame -> Perception.
 Pipeline per frame (all OpenCV, no models):
   1. Minimap: HSV mask of the player-dot colour inside calibration.minimap_box, largest
      sane blob -> player_map (fractions of the box).
-  2. Mobs: grayscale TM_CCOEFF_NORMED template matching on a copy downscaled by
-     detection.downscale (templates scaled the same, plus mirrored copies), local-maxima
-     above detection.mob_threshold, greedy non-max suppression across all templates,
-     then anything centred inside the minimap / HP / MP boxes is dropped.
-  3. Player: name-tag template matched at full resolution; body centre is placed
-     PLAYER_TAG_TO_BODY_PX above the tag centre. Otherwise a fixed screen estimate.
+  2. Mobs, two stages per template (and its mirror if detection.mirror_templates):
+     a. Propose: grayscale TM_CCOEFF_NORMED on a copy downscaled by detection.downscale;
+        local maxima >= mob_threshold - COARSE_MARGIN (at most MAX_VERIFY_PER_TEMPLATE).
+     b. Verify: colour (BGR) TM_CCOEFF_NORMED at full resolution in a small window
+        around each proposal, on images blurred with VERIFY_BLUR_SIGMA. Keep if
+        >= detection.mob_threshold; that verified score is Mob.score.
+     Why: a mob's other animation frames differ from the cropped frame by a few pixels of
+     shape (grayscale scores ~0.55-0.62), while leafy background has similar gray
+     texture (also ~0.6). Light blur forgives the small shape change and colour rejects
+     green-on-green leaves: on the real Tree That Grew II frame this moves the worst true
+     mob to 0.74 and the best background patch to 0.63.
+     Then greedy non-max suppression across all templates, and anything centred inside
+     the minimap / HP / MP boxes is dropped.
+  3. Player: name-tag template, coarse-to-fine; body centre is placed
+     detection.player_tag_offset_px above the tag centre. Otherwise a fixed screen estimate.
   4. HP/MP: calib.bar_fill on the calibrated bar boxes.
   5. Confidence: see `confidence_for`.
 
@@ -41,6 +50,7 @@ log = logging.getLogger(__name__)
 CHARACTER_HALF_HEIGHT_PX = 35
 TAG_TO_BODY_FACTOR = 1.8
 PLAYER_TAG_TO_BODY_PX = int(round(TAG_TO_BODY_FACTOR * CHARACTER_HALF_HEIGHT_PX))  # 63 px
+# ^ default only; settings.detection.player_tag_offset_px is used when set.
 
 # Where the character usually is when we can't see the tag (the camera follows the player).
 PLAYER_ESTIMATE_X_FRAC = 0.5
@@ -49,6 +59,10 @@ PLAYER_ESTIMATE_Y_FRAC = 0.62
 # --- mob matching ------------------------------------------------------------------------
 PLAYER_COARSE_PEAKS = 3      # name-tag candidates refined at full resolution
 PLAYER_COARSE_MARGIN = 0.25  # coarse score may be this much below player_threshold
+
+COARSE_MARGIN = 0.25         # proposals need coarse gray score >= mob_threshold - this
+VERIFY_BLUR_SIGMA = 1.5      # Gaussian sigma (px) applied before the colour verification
+MAX_VERIFY_PER_TEMPLATE = 25 # best proposals per template variant that get verified
 
 MIN_TEMPLATE_PX = 6         # a template smaller than this after downscaling is skipped
 MAX_CANDIDATES_PER_TEMPLATE = 200   # bound NMS work on noisy frames
@@ -78,19 +92,20 @@ class _Template:
     gray: np.ndarray          # full-resolution grayscale
     w: int                    # full-resolution size
     h: int
-    mirrored: bool = False
+    bgr: Optional[np.ndarray] = None   # full-resolution colour
 
 
 @dataclass
 class _Prepared:
     name: str
-    small: np.ndarray         # grayscale at the matching scale
+    small: np.ndarray         # grayscale at the matching scale (proposal stage)
+    verify: np.ndarray        # full-resolution BGR, blurred (verification stage)
     w: int                    # full-resolution size (for Mob.w/h)
     h: int
 
 
-def _load_gray(path: Path) -> Optional[np.ndarray]:
-    """Read an image as grayscale; works with non-ASCII Windows paths. None on failure."""
+def _load_bgr(path: Path) -> Optional[np.ndarray]:
+    """Read an image as BGR; works with non-ASCII Windows paths. None on failure."""
     try:
         data = np.fromfile(str(path), dtype=np.uint8)
         if data.size == 0:
@@ -98,9 +113,14 @@ def _load_gray(path: Path) -> Optional[np.ndarray]:
         img = cv2.imdecode(data, cv2.IMREAD_COLOR)   # drops alpha
         if img is None or img.size == 0:
             return None
-        return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        return img
     except Exception:
         return None
+
+
+def _load_gray(path: Path) -> Optional[np.ndarray]:
+    img = _load_bgr(path)
+    return None if img is None else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
 
 def _usable_template(gray: np.ndarray) -> bool:
@@ -141,11 +161,12 @@ class Perceiver:
         self._mob_raw: List[_Template] = []
         for p in mob_templates or []:
             p = Path(p)
-            g = _load_gray(p)
+            bgr = _load_bgr(p)
+            g = None if bgr is None else cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
             if g is None or not _usable_template(g):
                 log.warning("skipping mob template %s (unreadable or blank)", p)
                 continue
-            self._mob_raw.append(_Template(p.name, g, g.shape[1], g.shape[0]))
+            self._mob_raw.append(_Template(p.name, g, g.shape[1], g.shape[0], bgr))
 
         self._player: Optional[_Template] = None
         self.player_template_configured = player_template is not None
@@ -171,10 +192,10 @@ class Perceiver:
             return
         prepared: List[_Prepared] = []
         for t in self._mob_raw:
-            variants = [(t.name, t.gray)]
+            variants = [(t.name, t.gray, t.bgr)]
             if settings.detection.mirror_templates:
-                variants.append((t.name, cv2.flip(t.gray, 1)))
-            for name, g in variants:
+                variants.append((t.name, cv2.flip(t.gray, 1), cv2.flip(t.bgr, 1)))
+            for name, g, bgr in variants:
                 if scale != 1.0:
                     sw = max(1, int(round(t.w * scale)))
                     sh = max(1, int(round(t.h * scale)))
@@ -182,7 +203,8 @@ class Perceiver:
                 if min(g.shape[:2]) < MIN_TEMPLATE_PX or not _usable_template(g):
                     log.warning("mob template %s too small/flat at downscale %.2f; skipped", name, scale)
                     continue
-                prepared.append(_Prepared(name, np.ascontiguousarray(g), t.w, t.h))
+                verify = cv2.GaussianBlur(bgr, (0, 0), VERIFY_BLUR_SIGMA)
+                prepared.append(_Prepared(name, np.ascontiguousarray(g), verify, t.w, t.h))
         self._prepared = prepared
         self._player_small = None
         if self._player is not None and scale < 1.0:
@@ -192,6 +214,13 @@ class Perceiver:
             if min(g.shape[:2]) >= 4 and _usable_template(g):
                 self._player_small = np.ascontiguousarray(g)
         self._prep_key = key
+
+    def _tag_offset(self) -> int:
+        try:
+            v = int(getattr(self.settings.detection, "player_tag_offset_px", PLAYER_TAG_TO_BODY_PX))
+        except (TypeError, ValueError):
+            v = PLAYER_TAG_TO_BODY_PX
+        return v
 
     def _scale(self) -> float:
         try:
@@ -248,7 +277,7 @@ class Perceiver:
                                interpolation=cv2.INTER_AREA)
 
         # 2. mobs
-        mobs = self._find_mobs(gray, small if small is not None else gray, float(det.mob_threshold),
+        mobs = self._find_mobs(img, small if small is not None else gray, float(det.mob_threshold),
                                [b for b in (minimap_box, hp_box, mp_box) if b is not None])
 
         # 3. player
@@ -280,38 +309,62 @@ class Perceiver:
         )
 
     # ---- mobs -------------------------------------------------------------------------
-    def _find_mobs(self, gray: np.ndarray, small: np.ndarray, threshold: float,
+    def _find_mobs(self, img: np.ndarray, small: np.ndarray, threshold: float,
                    exclude: Sequence[Box]) -> List[Mob]:
-        """`small` is `gray` downscaled by detection.downscale (or `gray` itself at 1.0)."""
+        """`img` is the full BGR frame; `small` its grayscale copy downscaled by
+        detection.downscale (the full-size grayscale at 1.0)."""
         if not self._prepared:
             return []
+        H_, W_ = img.shape[:2]
         sh, sw = small.shape[:2]
         # Actual scale per axis (rounding) so coordinates map back exactly.
-        fx = gray.shape[1] / sw
-        fy = gray.shape[0] / sh
+        fx = W_ / sw
+        fy = H_ / sh
+        pad = int(np.ceil(max(fx, fy))) + 2            # search slack around a proposal
+        bpad = int(np.ceil(3 * VERIFY_BLUR_SIGMA))     # so the ROI blur has real context
+        coarse_th = threshold - COARSE_MARGIN
 
         cands = []   # (score, x0, y0, x1, y1, name, w, h) full-res box
         for tp in self._prepared:
             th, tw = tp.small.shape[:2]
-            if th > sh or tw > sw:
+            if th > sh or tw > sw or tp.h > H_ or tp.w > W_:
                 continue
             res = cv2.matchTemplate(small, tp.small, cv2.TM_CCOEFF_NORMED)
             np.nan_to_num(res, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-            if float(res.max()) < threshold:
+            if float(res.max()) < coarse_th:
                 continue
-            # Local maxima within half a template: one peak per object per template.
+            # Local maxima within half a template: one proposal per object per template.
             k = cv2.getStructuringElement(cv2.MORPH_RECT, (max(3, tw // 2) | 1, max(3, th // 2) | 1))
-            peaks = (res >= threshold) & (res >= cv2.dilate(res, k))
+            peaks = (res >= coarse_th) & (res >= cv2.dilate(res, k))
             ys, xs = np.nonzero(peaks)
             if xs.size == 0:
                 continue
-            scores = res[ys, xs]
-            if scores.size > MAX_CANDIDATES_PER_TEMPLATE:
-                top = np.argpartition(-scores, MAX_CANDIDATES_PER_TEMPLATE)[:MAX_CANDIDATES_PER_TEMPLATE]
-                xs, ys, scores = xs[top], ys[top], scores[top]
-            for x, y, s in zip(xs.tolist(), ys.tolist(), scores.tolist()):
-                cx = (x + tw / 2.0) * fx
-                cy = (y + th / 2.0) * fy
+            if xs.size > MAX_VERIFY_PER_TEMPLATE:
+                top = np.argpartition(-res[ys, xs], MAX_VERIFY_PER_TEMPLATE)[:MAX_VERIFY_PER_TEMPLATE]
+                xs, ys = xs[top], ys[top]
+            for x, y in zip(xs.tolist(), ys.tolist()):
+                gx, gy = int(round(x * fx)), int(round(y * fy))     # full-res top-left guess
+                x0 = max(0, gx - pad - bpad)
+                y0 = max(0, gy - pad - bpad)
+                x1 = min(W_, gx + tp.w + pad + bpad)
+                y1 = min(H_, gy + tp.h + pad + bpad)
+                if x1 - x0 < tp.w or y1 - y0 < tp.h:
+                    continue
+                roi = cv2.GaussianBlur(img[y0:y1, x0:x1], (0, 0), VERIFY_BLUR_SIGMA)
+                # Only accept positions within `pad` of the proposal (not in the blur margin).
+                ix0, iy0 = max(0, gx - pad - x0), max(0, gy - pad - y0)
+                ix1 = min(x1 - x0 - tp.w, gx + pad - x0)
+                iy1 = min(y1 - y0 - tp.h, gy + pad - y0)
+                if ix1 < ix0 or iy1 < iy0:
+                    continue
+                rr = cv2.matchTemplate(roi[iy0:iy1 + tp.h, ix0:ix1 + tp.w], tp.verify,
+                                       cv2.TM_CCOEFF_NORMED)
+                np.nan_to_num(rr, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+                _, s, _, (bx, by) = cv2.minMaxLoc(rr)
+                if s < threshold:
+                    continue
+                cx = x0 + ix0 + bx + tp.w / 2.0
+                cy = y0 + iy0 + by + tp.h / 2.0
                 cands.append((s, cx - tp.w / 2.0, cy - tp.h / 2.0, cx + tp.w / 2.0,
                               cy + tp.h / 2.0, tp.name, tp.w, tp.h))
 
@@ -391,5 +444,5 @@ class Perceiver:
         if best_xy is None or best < threshold:
             return None
         cx = best_xy[0] + tp.w // 2
-        cy = best_xy[1] + tp.h // 2 - PLAYER_TAG_TO_BODY_PX
+        cy = best_xy[1] + tp.h // 2 - self._tag_offset()
         return (int(cx), int(max(0, cy)))
