@@ -55,7 +55,6 @@ class SettingsWindow(tk.Toplevel):
         ttk.Button(bar, text="Reset this tab to defaults", command=self.reset_tab).pack(side="left")
         ttk.Button(bar, text="Cancel", command=self.destroy).pack(side="right")
         ttk.Button(bar, text="Save", command=self.save).pack(side="right", padx=6)
-        self.bind("<Escape>", lambda _e: self.destroy())
 
     # ---- rows ------------------------------------------------------------
     def _add_row(self, frame, row: int, spec: logic.FieldSpec, value):

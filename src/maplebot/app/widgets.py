@@ -322,9 +322,24 @@ class KeyPicker(ttk.Frame):
         self._changed()
 
     def _changed(self):
-        self.shown.config(text=keymap.display_name(self.get()))
+        name = self.get()
+        if name:
+            try:
+                from maplebot.controls import normalize_key
+                canon = normalize_key(name)
+            except ValueError as e:
+                self.shown.config(text="?")
+                if self.error_cb:
+                    self.error_cb(str(e))
+                return
+            except Exception:          # controls not importable: keep what was typed
+                canon = name.lower()
+            if canon != name:
+                self.var.set(canon)
+            name = canon
+        self.shown.config(text=keymap.display_name(name))
         if self.on_change:
-            self.on_change(self.get())
+            self.on_change(name)
 
     def listen(self):
         top = self.winfo_toplevel()

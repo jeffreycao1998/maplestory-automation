@@ -147,6 +147,53 @@ def minimap_dot_to_image(box: Sequence[int], pos: Sequence[float]) -> Tuple[int,
     return int(x + pos[0] * w), int(y + pos[1] * h)
 
 
+def dot_near_click(box: Sequence[int], pos: Optional[Sequence[float]], click: Sequence[int],
+                   tol_px: Optional[float] = None) -> bool:
+    """Is the detected dot (fractions of the minimap box) where the user clicked?"""
+    if pos is None:
+        return False
+    px, py = box[0] + pos[0] * box[2], box[1] + pos[1] * box[3]
+    tol = tol_px if tol_px is not None else max(4.0, 0.04 * box[2])
+    return math.hypot(px - (click[0] + 0.5), py - (click[1] + 0.5)) <= tol
+
+
+DEFAULT_DOT_HSV = ([20, 150, 180], [35, 255, 255])
+
+
+def dot_range_candidates(sampled: Tuple[Sequence[int], Sequence[int]],
+                         current: Optional[Tuple[Sequence[int], Sequence[int]]] = None):
+    """Colour ranges to try after a click on the dot, most specific first.
+
+    The sampled range can come out too wide (a click picks up the dot's dark outline),
+    so stricter variants and the known-good default are tried too.
+    """
+    lo, hi = list(sampled[0]), list(sampled[1])
+    strict = [lo[0], max(lo[1], 150), max(lo[2], 180)]
+    out = [(lo, hi), (strict, hi), (list(DEFAULT_DOT_HSV[0]), list(DEFAULT_DOT_HSV[1]))]
+    if current:
+        out.append((list(current[0]), list(current[1])))
+    uniq = []
+    for c in out:
+        if c not in uniq:
+            uniq.append(c)
+    return uniq
+
+
+def pick_dot_range(candidates, locate, box: Sequence[int], click: Sequence[int]):
+    """First (low, high, pos) whose detected dot is at the click; else (None, None, pos_of_first).
+
+    ``locate(low, high)`` returns the dot position (fractions) or None.
+    """
+    first_pos = None
+    for i, (lo, hi) in enumerate(candidates):
+        pos = locate(lo, hi)
+        if i == 0:
+            first_pos = pos
+        if dot_near_click(box, pos, click):
+            return lo, hi, pos
+    return None, None, first_pos
+
+
 def preview_size(w: int, h: int, target_w: int = 480) -> Tuple[int, int]:
     """Size to show the live preview at (~target_w wide, aspect kept, never upscaled)."""
     if w <= 0 or h <= 0:
@@ -360,25 +407,44 @@ def field_kind(section: str, name: str, tp: Any) -> str:
     return KIND_OVERRIDES.get((section, name)) or _kind_from_type(tp)
 
 
+def _hints(cls: type) -> Dict[str, Any]:
+    try:
+        return typing.get_type_hints(cls)
+    except Exception:          # unresolvable annotation: infer from defaults instead
+        return {}
+
+
+def _type_of_default(value: Any) -> Any:
+    if value is None:
+        return Optional[str]
+    if isinstance(value, list):
+        if value and all(isinstance(v, int) and not isinstance(v, bool) for v in value):
+            return List[int]
+        return List[float] if value and all(isinstance(v, (int, float)) for v in value) else List[str]
+    return type(value)
+
+
 def iter_fields(settings_cls: type = Settings) -> List[FieldSpec]:
     """Every editable setting, grouped by section, in declaration order."""
     out: List[FieldSpec] = []
-    top_hints = typing.get_type_hints(settings_cls)
+    top_hints = _hints(settings_cls)
     defaults = settings_cls()
     general: List[FieldSpec] = []
     for sec in dataclasses.fields(settings_cls):
         sec_val = getattr(defaults, sec.name)
         if dataclasses.is_dataclass(sec_val):
-            hints = typing.get_type_hints(type(sec_val))
+            hints = _hints(type(sec_val))
             for f in dataclasses.fields(sec_val):
                 label, tip = FIELD_INFO.get((sec.name, f.name), (humanize(f.name), ""))
+                dv = getattr(sec_val, f.name)
+                tp = hints.get(f.name, _type_of_default(dv))
                 out.append(FieldSpec(sec.name, f.name, label, tip,
-                                     field_kind(sec.name, f.name, hints[f.name]),
-                                     getattr(sec_val, f.name)))
+                                     field_kind(sec.name, f.name, tp), dv))
         else:
             label, tip = FIELD_INFO.get((GENERAL, sec.name), (humanize(sec.name), ""))
+            tp = top_hints.get(sec.name, _type_of_default(sec_val))
             general.append(FieldSpec(GENERAL, sec.name, label, tip,
-                                     field_kind(GENERAL, sec.name, top_hints[sec.name]), sec_val))
+                                     field_kind(GENERAL, sec.name, tp), sec_val))
     return out + general
 
 
@@ -643,6 +709,7 @@ class WizardContext:
     n_mob_templates: int = 0
     patrol_left_set: Optional[float] = None
     patrol_right_set: Optional[float] = None
+    patrol_preset: bool = False     # profile already had patrol edges -> may keep them
 
 
 def step_index(key: str) -> int:
@@ -751,13 +818,18 @@ def step_problem(key: str, ctx: WizardContext) -> Optional[str]:
         return (validate_bar_box(c.hp_bar_box, size, "HP bar")
                 or validate_bar_box(c.mp_bar_box, size, "MP bar"))
     if key == "patrol":
-        left = ctx.patrol_left_set if ctx.patrol_left_set is not None else c.patrol_left
-        right = ctx.patrol_right_set if ctx.patrol_right_set is not None else c.patrol_right
+        if ctx.patrol_preset:
+            left = ctx.patrol_left_set if ctx.patrol_left_set is not None else c.patrol_left
+            right = ctx.patrol_right_set if ctx.patrol_right_set is not None else c.patrol_right
+        else:
+            left, right = ctx.patrol_left_set, ctx.patrol_right_set
         return validate_patrol(left, right)
     if key == "keys":
         return validate_keys(ctx.settings.keys)
     if key == "summary":
-        probs = ctx.settings.problems()
+        probs = list(ctx.settings.problems())
+        if ctx.n_mob_templates <= 0:
+            probs.append("No mob pictures saved (step 5)")
         return ("Not finished yet: " + "; ".join(probs) + ".") if probs else None
     return None
 

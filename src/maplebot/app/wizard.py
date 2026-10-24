@@ -37,6 +37,9 @@ class SetupWizard(tk.Toplevel):
         self.hide_also = hide_also or [master]
         self.ctx = WizardContext(settings=Settings.from_dict(settings.to_dict()))
         self.ctx.n_mob_templates = len(profile.mob_templates())
+        # A profile that was set up before keeps its patrol edges unless the user changes them.
+        self.ctx.patrol_preset = profile.settings_path.exists() and bool(settings.calibration.minimap_box)
+        self.session_boxes: list = []  # mob boxes drawn on the current screenshot
         self.image = None             # current full-res BGR screenshot
         self.patrol_image = None      # last screenshot taken in the patrol step
         self.step = 0
@@ -73,7 +76,6 @@ class SetupWizard(tk.Toplevel):
         self.skip_btn.pack(side="right", padx=6)
 
         self.protocol("WM_DELETE_WINDOW", self.close)
-        self.bind("<Escape>", lambda _e: self.close())
         self.show_step(0)
         self.lift()
         self.focus_force()
@@ -187,6 +189,7 @@ class SetupWizard(tk.Toplevel):
         self.image = image
         h, w = image.shape[:2]
         self.ctx.screenshot_size = (w, h)
+        self.session_boxes = []
         if old and old != (w, h):
             self.info(f"The game window size changed ({old[0]} x {old[1]} -> {w} x {h}). "
                       "Draw the boxes again on this screenshot.", "#a05a00")
@@ -235,8 +238,10 @@ class SetupWizard(tk.Toplevel):
                        "window after setup. If you do, run this setup again.").pack(anchor="w", pady=10)
         if self.ctx.window_box:
             self._show_window_box()
+        else:
+            self.after(200, lambda: self._find_window(quiet=True))
 
-    def _find_window(self):
+    def _find_window(self, quiet: bool = False):
         title = self.title_var.get().strip() or "MapleStory"
         self.s.calibration.window_title = title
         try:
@@ -245,6 +250,8 @@ class SetupWizard(tk.Toplevel):
         except Exception as e:
             self.ctx.window_box = None
             log.info("find window failed: %s", e)
+            if quiet:
+                return
             msg = str(e) if type(e).__name__ == "WindowNotFound" else logic.friendly_error(e)[1]
             self.window_lbl.config(text=msg, foreground="#c00000")
             return
@@ -358,20 +365,28 @@ class SetupWizard(tk.Toplevel):
         self.info("Click right on the middle of your yellow dot.", "#555555")
 
     def _got_dot_click(self, x, y):
-        from maplebot.perception.calib import hsv_range_from_sample
+        from maplebot.perception.calib import hsv_range_from_sample, minimap_player_position
 
         c = self.s.calibration
-        old = (list(c.player_dot_hsv_low), list(c.player_dot_hsv_high))
-        low, high = hsv_range_from_sample(self.image, x, y)
-        c.player_dot_hsv_low, c.player_dot_hsv_high = list(low), list(high)
-        self._refresh_dot()
-        if self.ctx.dot_pos is None:
-            c.player_dot_hsv_low, c.player_dot_hsv_high = old
-            self.error("Couldn't find a dot there. Click right on your yellow dot (zoom: it's the "
-                       "yellow one, not the other players' or NPCs').")
+        sampled = hsv_range_from_sample(self.image, x, y)
+        current = (list(c.player_dot_hsv_low), list(c.player_dot_hsv_high))
+        cands = logic.dot_range_candidates(sampled, current)
+
+        def locate(lo, hi):
+            return minimap_player_position(self.image, c.minimap_box, lo, hi)
+
+        lo, hi, pos = logic.pick_dot_range(cands, locate, c.minimap_box, (x, y))
+        if lo is not None:
+            c.player_dot_hsv_low, c.player_dot_hsv_high = list(lo), list(hi)
+            self.ctx.dot_pos = pos
+            self.info(f"Found you at {pos[0]:.2f} across the minimap (green circle). "
+                      "If the circle is on your yellow dot, click Next; otherwise click Try again.")
         else:
-            self.info(f"Found you at {self.ctx.dot_pos[0]:.2f} across the minimap (green circle). "
-                      "If the circle is on your dot, click Next; otherwise click Try again.")
+            self._refresh_dot()       # keep the previous colours
+            self.ctx.dot_pos = None
+            self.error("That doesn't look like your dot -- the bot would see you somewhere else. "
+                       "Click right in the middle of your own yellow dot (not a party member's "
+                       "orange dot or an NPC).")
         self._redraw_dot()
 
     # -------------------------------------------------------------- 5. mobs
@@ -382,12 +397,12 @@ class SetupWizard(tk.Toplevel):
         bar.pack(fill="x", pady=(0, 6))
         self._retake_button(bar, self._redraw_mobs).pack(side="left")
         ttk.Label(bar, foreground="#555555",
-                  text="  Each box you draw is saved. Draw another box to add another mob picture.").pack(side="left")
+                  text="  Each box is saved right away. To add another mob, just drag another box "
+                       "(retake the screenshot to catch other poses).").pack(side="left")
         self.canvas = ImageCanvas(f, self.canvas_w, self.canvas_h - 90)
         self.canvas.pack()
         self.canvas.mode = "box"
         self.canvas.on_box = self._got_mob
-        self.session_boxes = getattr(self, "session_boxes", [])
         self.thumb_row = ttk.Frame(f)
         self.thumb_row.pack(fill="x", pady=6)
         self._redraw_mobs()
@@ -684,7 +699,8 @@ class SetupWizard(tk.Toplevel):
         rows = [("attack", "Attack skill key", False, "The key your attack skill is on, e.g. Ctrl."),
                 ("jump", "Jump key", False, "Your jump key, e.g. Alt."),
                 ("hp_potion", "HP potion key (optional)", True, "Leave as (none) to not drink HP potions."),
-                ("mp_potion", "MP potion key (optional)", True, "Leave as (none) to not drink MP potions.")]
+                ("mp_potion", "MP potion key (recommended)", True,
+                 "Magicians run out of MP fast. Set this (and the MP bar in step 7) so the bot drinks MP potions.")]
         for r, (field, label, optional, tip) in enumerate(rows):
             lbl = ttk.Label(grid, text=label)
             lbl.grid(row=r, column=0, sticky="w", pady=4, padx=(0, 12))
@@ -711,8 +727,8 @@ class SetupWizard(tk.Toplevel):
         sc.grid(row=0, column=1, padx=8)
         range_lbl.grid(row=0, column=2)
         ttk.Label(sf, foreground="#555555",
-                  text="Magic Claw / Energy Bolt reach roughly 300-400 px at 800x600. Start a bit short; "
-                       "the green box in the live preview shows the reach.").grid(row=1, column=0, columnspan=3, sticky="w")
+                  text="Start around 300 px and check the green box in the live preview: it should "
+                       "end where your Magic Claw stops hitting. A bit short is safer than too long.").grid(row=1, column=0, columnspan=3, sticky="w")
 
         ttk.Label(sf, text="Time between casts (seconds):").grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.cd_var = tk.StringVar(value=f"{sk.cooldown_s:.2f}")
@@ -736,9 +752,6 @@ class SetupWizard(tk.Toplevel):
         self.s.skill.cooldown_s = v
         self.msg.config(text="")
 
-    def _leave_keys(self):
-        self._cd_changed()
-
     # --------------------------------------------------------- 10. summary
     def _build_summary(self, f):
         if hasattr(self, "cd_var"):
@@ -750,11 +763,9 @@ class SetupWizard(tk.Toplevel):
         box.pack(fill="x", pady=6)
         for line in logic.summary_lines(self.ctx, self.profile.player_template() is not None):
             ttk.Label(box, text=line).pack(anchor="w", pady=1)
-        probs = self.s.problems()
-        if self.ctx.n_mob_templates == 0:
-            probs = probs + ["No mob pictures saved (step 5)"]
-        if probs:
-            ttk.Label(f, foreground="#c00000", text="Still missing: " + "; ".join(probs)).pack(anchor="w", pady=6)
+        problem = logic.step_problem("summary", self.ctx)
+        if problem:
+            ttk.Label(f, foreground="#c00000", text=problem, wraplength=self.canvas_w).pack(anchor="w", pady=6)
         else:
             ttk.Label(f, foreground="#1a6e1a",
                       text="Everything needed is set. Click Save.").pack(anchor="w", pady=6)
