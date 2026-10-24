@@ -239,3 +239,22 @@ def test_refuses_to_start_without_name_tag(world):
     (profile.templates_dir / "player.png").unlink()
     with pytest.raises(RunnerError, match="name tag"):
         BotRunner(profile, settings, backend=FakeBackend(), use_hotkeys=False).run()
+
+
+def test_resume_then_stop_never_lifts_the_block(world):
+    """Final review finding 3: resume immediately followed by stop."""
+    seq, settings, profile = world
+    for _ in range(20):
+        r, backend, _ = _runner(seq, settings, profile, frames=None)
+        t = threading.Thread(target=r.run, daemon=True)
+        t.start()
+        time.sleep(0.15)
+        r.pause()
+        time.sleep(0.15)
+        n = len(backend.events)
+        r.resume(); r.stop()
+        time.sleep(0.1)
+        assert backend.held == set()
+        presses = [e for e in backend.events[n:] if e[2]]
+        assert presses == [], f"keys pressed after Stop: {presses}"
+        t.join(5)

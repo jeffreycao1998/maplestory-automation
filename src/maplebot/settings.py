@@ -54,7 +54,7 @@ class Calibration:
     # On-platform band is [patrol_y - above, patrol_y + below]. Bridges sag downward
     # (~0.06-0.07 of minimap height on The Tree That Grew II) and you only ever fall down;
     # the next bridge down is ~0.117 below the ends.
-    patrol_y_tolerance: float = 0.10          # how far BELOW patrol_y still counts as on the bridge
+    patrol_y_tolerance: float = 0.095         # how far BELOW patrol_y still counts as on the bridge
     patrol_y_tolerance_above: float = 0.03    # how far ABOVE patrol_y still counts as on the bridge
     player_dot_hsv_low: List[int] = field(default_factory=lambda: [20, 150, 180])
     player_dot_hsv_high: List[int] = field(default_factory=lambda: [35, 255, 255])

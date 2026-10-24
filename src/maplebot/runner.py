@@ -95,6 +95,7 @@ class BotRunner:
             if not self._stop.is_set():
                 self._stop_reason = reason
             self._stop.set()
+            self._resume_pending = False
             c = self._controller
         if c is not None:
             c.inhibit(reason)
@@ -211,14 +212,14 @@ class BotRunner:
                     resume_now = self._resume_pending
                     self._resume_pending = False
                     paused = self._paused
-                    if resume_now and not paused:
+                    if resume_now and not paused and not self._stop.is_set():
                         # Lift the inhibit while holding the runner lock: a pause() that
                         # races in now sets _paused only after this, and its inhibit()
                         # then runs after allow() — so a new pause always wins.
                         # (Lock order is runner -> controller; pause()/stop() release the
                         # runner lock before calling inhibit(), so this can't deadlock.)
                         controller.allow()
-                if resume_now and not paused:
+                if resume_now and not paused and not self._stop.is_set():
                     behavior.reset()
                     supervisor.reset(tick_t0 if own_capture else (t_start or 0.0))
 

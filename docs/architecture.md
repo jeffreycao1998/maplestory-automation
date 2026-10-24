@@ -86,7 +86,7 @@ class MapModel:
     patrol_y_tolerance_above: float            # allowed distance ABOVE patrol_y
     patrol_y_band: tuple[float, float] | None  # (top, bottom)
     def side_of_patrol(self, x: float) -> str  # "left_out" | "inside" | "right_out"
-    def on_platform(self, x: float | None, y: float | None) -> bool   # True if patrol_y unset
+    def on_platform(self, x: float, y: float | None) -> bool   # True if patrol_y unset
 
 # maplebot/behavior/__init__.py
 class Behavior:
