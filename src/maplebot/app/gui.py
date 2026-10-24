@@ -480,10 +480,34 @@ def acquire_single_instance(logs_dir: Path):
         else:
             import fcntl
             fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    except OSError as e:
         f.close()
-        raise AlreadyRunning("The bot is already open.") from None
+        if lock_held_by_other(e):
+            raise AlreadyRunning("The bot is already open.") from None
+        raise                       # some other failure: caller carries on without the guard
     return f
+
+
+def lock_held_by_other(e: OSError) -> bool:
+    """Does this lock error mean another process holds the lock?
+
+    flock: EWOULDBLOCK/EAGAIN (also EACCES on some systems). msvcrt.locking with
+    LK_NBLCK: EACCES (13) or EDEADLK/EDEADLOCK (36 on Windows). Anything else (ENOLCK,
+    EINVAL on network or odd file systems, ...) is not "already open".
+    """
+    import errno
+
+    return e.errno in _busy_errnos(sys.platform)
+
+
+def _busy_errnos(platform: str) -> set:
+    import errno
+
+    busy = {errno.EACCES, errno.EAGAIN, getattr(errno, "EWOULDBLOCK", errno.EAGAIN),
+            errno.EDEADLK, getattr(errno, "EDEADLOCK", errno.EDEADLK)}
+    if platform == "win32":
+        busy |= {13, 36}            # msvcrt.locking: EACCES / EDEADLOCK (36 on Windows)
+    return busy
 
 
 def write_pid_file(logs_dir: Path) -> Path:
@@ -522,7 +546,10 @@ def main() -> None:
                            "(it may be behind the game or minimised to the taskbar).")
         raise SystemExit(3)
     except OSError:
-        _instance_lock = None          # can't lock (odd file system): carry on without the guard
+        # Couldn't lock for another reason (odd/network file system): carry on without
+        # the single-instance guard rather than refusing to open.
+        logging.getLogger("maplebot.app").warning("single-instance lock unavailable", exc_info=True)
+        _instance_lock = None
     write_pid_file(profile.logs_dir)
     logfile = setup_logging(profile.logs_dir)
     log.info("MapleBot starting (python %s, %s)", sys.version.split()[0], sys.platform)

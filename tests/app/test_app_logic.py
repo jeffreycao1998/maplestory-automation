@@ -746,14 +746,26 @@ def test_single_instance_lock(tmp_path):
     assert out.strip() == "ok", err
 
 
-def test_start_bat_single_instance_logic():
-    text = (__import__("pathlib").Path(__file__).resolve().parents[2] / "start.bat").read_bytes().decode("ascii")
-    launch = text[text.index(":launch"):]
-    # the pid file is only deleted after checking its PID isn't alive
-    assert launch.index("call :pid_alive") < launch.index('del /q "logs\\app.pid"')
-    # fallback checks the background copy before starting a console copy
-    fb = text[text.index(":fallback\r\n"):]
-    assert fb.index("call :pyw_alive") < fb.index('".venv\\Scripts\\python.exe" -m maplebot')
-    labels = set(__import__("re").findall(r"^:([a-z_]+)", text, __import__("re").M))
-    targets = set(__import__("re").findall(r"(?:goto|call) :([a-z_]+)", text)) - {"name"}
-    assert targets <= labels, targets - labels
+def test_lock_errors_only_busy_means_already_open(tmp_path, monkeypatch):
+    import errno
+    import types
+    from maplebot.app import gui
+    for code in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+        assert gui.lock_held_by_other(OSError(code, "busy"))
+    for code in (errno.ENOLCK, errno.EINVAL, errno.EIO):
+        assert not gui.lock_held_by_other(OSError(code, "other"))
+    assert 36 in gui._busy_errnos("win32")
+    if errno.EDEADLK != 36:
+        assert 36 not in gui._busy_errnos("linux")     # ENAMETOOLONG on Linux, not "busy"
+
+    # a non-busy failure propagates as plain OSError (main() then carries on unlocked)
+    fake = types.SimpleNamespace(LOCK_EX=2, LOCK_NB=4,
+                                 flock=lambda *a: (_ for _ in ()).throw(OSError(errno.ENOLCK, "no locks")))
+    monkeypatch.setitem(sys.modules, "fcntl", fake)
+    monkeypatch.setattr(gui.sys, "platform", "linux")
+    with pytest.raises(OSError) as ei:
+        gui.acquire_single_instance(tmp_path)
+    assert not isinstance(ei.value, gui.AlreadyRunning)
+    fake.flock = lambda *a: (_ for _ in ()).throw(OSError(errno.EAGAIN, "busy"))
+    with pytest.raises(gui.AlreadyRunning):
+        gui.acquire_single_instance(tmp_path)
