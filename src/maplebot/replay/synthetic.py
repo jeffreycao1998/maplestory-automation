@@ -235,7 +235,9 @@ def _background(seed: int, w: int, h: int, ground_y: int) -> np.ndarray:
         col = tuple(int(v) for v in rng.integers(30, 120, 3))
         cv2.circle(img, (px, py), int(rng.integers(2, 5)), col, -1)
 
-    noise = rng.normal(0, 2.0, img.shape).astype(np.float32)
+    # 2x2-block sensor-like noise: texture for the matcher, but keeps PNGs ~half the size
+    small = rng.normal(0, 2.0, ((h + 1) // 2, (w + 1) // 2, 3)).astype(np.float32)
+    noise = np.repeat(np.repeat(small, 2, axis=0), 2, axis=1)[:h, :w]
     return np.clip(img.astype(np.float32) + noise, 0, 255).astype(np.uint8)
 
 

@@ -166,7 +166,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 break
             frame = cap.grab()
             n += 1
-            write_png(frames_dir / f"{n:06d}.png", frame.image, compression=1)
+            write_png(frames_dir / f"{n:06d}.png", frame.image, compression=3)
             meta["frame_t"].append(round(frame.t - t0, 3))
             if list(frame.window) != meta["window"]:
                 meta.setdefault("window_changes", []).append(
