@@ -28,9 +28,16 @@ CAPTURE_COUNTDOWN_S = 3
 class SetupWizard(tk.Toplevel):
     def __init__(self, master: tk.Tk, profile: Profile, settings: Settings,
                  on_saved: Optional[Callable[[Settings], None]] = None,
-                 hide_also: Optional[List[tk.Misc]] = None):
+                 hide_also: Optional[List[tk.Misc]] = None,
+                 kept_from: Optional[str] = None):
+        """``kept_from``: name of the map this one was created from (its window title,
+        dot colour, name tag and HP/MP bars were copied), so those steps can be kept."""
         super().__init__(master)
-        self.title("MapleBot setup")
+        try:
+            self.map_name = profile.current_map_name()
+        except Exception:
+            self.map_name = None
+        self.title(logic.wizard_title(self.map_name))
         self.master_root = master
         self.profile = profile
         self.on_saved = on_saved
@@ -38,8 +45,14 @@ class SetupWizard(tk.Toplevel):
         self.ctx = WizardContext(settings=Settings.from_dict(settings.to_dict()))
         self.ctx.n_mob_templates = len(profile.mob_templates())
         self.ctx.has_player_template = profile.player_template() is not None
-        # A profile that was set up before keeps its patrol edges unless the user changes them.
-        self.ctx.patrol_preset = profile.settings_path.exists() and bool(settings.calibration.minimap_box)
+        # A map that was set up before keeps its patrol edges unless the user changes them
+        # (per map: profile paths always point at the current map).
+        map_set_up = _safe(profile.map_is_set_up, False)
+        self.ctx.patrol_preset = map_set_up and bool(settings.calibration.minimap_box)
+        self.kept_from = kept_from
+        self.kept = logic.kept_steps(self.ctx.settings, self.ctx.has_player_template,
+                                     map_set_up, kept_from)
+        self.redo: set = set()
         self.session_boxes: list = []  # mob boxes drawn on the current screenshot
         self.image = None             # current full-res BGR screenshot
         self.patrol_image = None      # last screenshot taken in the patrol step
@@ -98,20 +111,57 @@ class SetupWizard(tk.Toplevel):
     def show_step(self, i: int):
         self.step = max(0, min(i, len(WIZARD_STEPS) - 1))
         st = WIZARD_STEPS[self.step]
-        self.step_lbl.config(text=logic.step_label(self.step))
+        self.step_lbl.config(text=logic.step_label(self.step, self.map_name))
         self.dots.config(text="  ".join("●" if j <= self.step else "○" for j in range(len(WIZARD_STEPS))))
         self.instr.config(text=st.instruction)
         self.msg.config(text="")
         for w in self.body.winfo_children():
             w.destroy()
         self._thumbs = []
+        if st.key == "dot":
+            self._refresh_dot()
+        kept = self._is_kept(st.key)
+        if kept:
+            self._kept_banner(self.body, st.key)
         getattr(self, f"_build_{st.key}")(self.body)
+        if kept and st.key in ("dot", "player", "bars") and hasattr(self, "canvas"):
+            self.canvas.mode = None          # look, don't touch -- until Redo
+        elif (st.key == "dot" and st.key in self.kept and st.key not in self.redo
+              and self.ctx.dot_pos is None and self.image is not None and self.s.calibration.minimap_box):
+            self.info(f"The dot colour from {self.kept_from} doesn't find you on this map. "
+                      "Click your yellow dot.", "#a05a00")
         self.back_btn.state(["!disabled"] if self.step > 0 else ["disabled"])
         if st.optional:
             self.skip_btn.pack(side="right", padx=6)
         else:
             self.skip_btn.pack_forget()
         self.next_btn.config(text="Save" if st.key == "summary" else "Next >")
+
+    # ------------------------------------------------------------ kept steps
+    def _is_kept(self, key: str) -> bool:
+        if key not in self.kept or key in self.redo:
+            return False
+        c = self.s.calibration
+        if key == "dot":
+            return self.ctx.dot_pos is not None
+        if key == "player":
+            return self.profile.player_template() is not None
+        if key == "bars":
+            return bool(c.hp_bar_box)
+        return True
+
+    def _kept_banner(self, f, key: str):
+        box = ttk.Frame(f, padding=(8, 6))
+        box.pack(fill="x", pady=(0, 8))
+        ttk.Label(box, text=logic.kept_message(self.kept_from or "your other map"),
+                  foreground="#1a5e9a", font=("Segoe UI", 10, "bold"),
+                  wraplength=self.canvas_w - 120, justify="left").pack(side="left")
+        if key in ("dot", "player", "bars"):
+            ttk.Button(box, text="Redo", command=lambda: self._redo(key)).pack(side="right")
+
+    def _redo(self, key: str):
+        self.redo.add(key)
+        self.show_step(self.step)
 
     def next(self):
         if self.busy:
@@ -149,6 +199,14 @@ class SetupWizard(tk.Toplevel):
             self.destroy()
 
     def save(self):
+        new_name = logic.clean_map_name(self.name_var.get()) if hasattr(self, "name_var") else None
+        if new_name and self.map_name and new_name != self.map_name:
+            try:
+                self.profile.rename_map(self.profile.current_map, new_name)
+                self.map_name = new_name
+            except Exception as e:          # MapError: friendly text
+                self.error(logic.friendly_error(e)[1])
+                return
         try:
             self.profile.save(self.s)
         except OSError as e:
@@ -545,7 +603,9 @@ class SetupWizard(tk.Toplevel):
         except OSError as e:
             self.error(f"Couldn't delete: {e}")
             return
-        self._redraw_player()
+        self.ctx.has_player_template = False
+        self.redo.add("player")
+        self.show_step(self.step)
 
     # --------------------------------------------------------- 7. HP / MP
     def _build_bars(self, f):
@@ -791,6 +851,14 @@ class SetupWizard(tk.Toplevel):
                 self._cd_changed()
             except tk.TclError:
                 pass
+        if self.map_name:
+            row = ttk.Frame(f)
+            row.pack(anchor="w", pady=(0, 6))
+            ttk.Label(row, text="Map name:").pack(side="left")
+            self.name_var = tk.StringVar(value=self.map_name)
+            e = ttk.Entry(row, textvariable=self.name_var, width=32)
+            e.pack(side="left", padx=8)
+            Tooltip(e, "Shown in the Map list in the main window. Example: The Tree That Grew II")
         box = ttk.LabelFrame(f, text="Your setup", padding=10)
         box.pack(fill="x", pady=6)
         self.ctx.has_player_template = self.profile.player_template() is not None
@@ -812,3 +880,11 @@ def _overlaps(a, b) -> bool:
     ax, ay, aw, ah = a
     bx, by, bw, bh = b
     return ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
+
+
+def _safe(fn, default):
+    try:
+        return fn()
+    except Exception:
+        log.warning("profile call failed", exc_info=True)
+        return default

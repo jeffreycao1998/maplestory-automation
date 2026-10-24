@@ -114,7 +114,26 @@ death, a popup), when it sees no monsters for a long time, or when it keeps gett
 stuck. It stops completely if HP gets critically low or the time limit is reached.
 Check the game, fix the problem, then press **F11** or **Resume**.
 
-## 7. Troubleshooting
+## 7. Training on more than one map
+
+MapleBot keeps a separate setup for each map. Your keys, skill and safety settings are
+shared by all of them.
+
+- **Pick the map before you press Start.** Use the **Map** dropdown at the top of the
+  main window. A map marked **(not set up)** isn't ready yet. Its Start button says
+  **Run the setup wizard for this map**.
+- **New map…** asks for a name (e.g. *The Tree That Grew II*) and opens the wizard
+  straight away. Your game window, dot colour, name tag, HP/MP bars and keys are kept
+  from the map you were on. Those steps say **"Kept from your other map"**: click
+  **Next** to keep them, or **Redo** to do them again. You only need to redo the
+  **minimap box**, the **mobs** and the **training area**.
+- **Tip:** set a map up while your character is standing on that map, so the
+  screenshot shows its minimap and monsters.
+- **Rename…** changes the name shown in the list. **Delete** removes a map's setup,
+  including its mob pictures, after asking you first. You can't delete your only map.
+- You can't switch maps while the bot is running. Stop it first.
+
+## 8. Troubleshooting
 
 | Problem | What to do |
 |---|---|
@@ -126,6 +145,7 @@ Check the game, fix the problem, then press **F11** or **Resume**.
 | It **walks off the edge** | Run step 8 again, or nudge **Patrol left/right edge** inward in Settings → Screen setup. |
 | It **attacks too early or too late** | Adjust **Skill reach** (Settings → Attack skill) until the green box in the preview matches where your skill actually hits. |
 | It **casts too slowly or presses too often** | Adjust **Time between casts**. |
+| It **walks around the wrong map / can't see you** after changing maps | Pick the map you're actually on in the **Map** dropdown before pressing Start. |
 | **"Game window not found"** | The game must be open, windowed and not minimised. Check the window title in Settings → Screen setup. |
 | The **wizard screenshot is black or blank** | Don't minimise the game. Click on it during the countdown so nothing covers it. |
 | **Potions aren't used** | Set the HP/MP bar boxes (wizard step 7) and the potion keys (step 9). |
@@ -138,5 +158,6 @@ Check the game, fix the problem, then press **F11** or **Resume**.
 and each run has its own folder with details and pictures of any problems. Include them
 when you ask for help.
 
-**Your setup** lives in the `profile` folder: `settings.yaml` plus the mob and name tag
-pictures. Back it up if you like. Delete it to start fresh.
+**Your setup** lives in the `profile` folder: `settings.yaml` holds the shared settings,
+and `maps\<map>\` holds each map's screen setup and its mob and name tag pictures. Back
+it up if you like. Delete it to start fresh.

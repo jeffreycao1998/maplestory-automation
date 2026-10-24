@@ -394,3 +394,51 @@ def available_key_names() -> List[str]:
 
 HOTKEY_CHOICES = [f"f{i}" for i in range(1, 13)] + ["pause", "scroll_lock", "insert", "home",
                                                      "end", "page_up", "page_down"]
+
+
+# ---------------------------------------------------------------------------
+# Small text prompt
+# ---------------------------------------------------------------------------
+
+def ask_text(master, title: str, prompt: str, initial: str = "", hint: str = "") -> Optional[str]:
+    """Modal one-line text prompt. Returns the text, or None if cancelled."""
+    top = tk.Toplevel(master)
+    top.title(title)
+    top.resizable(False, False)
+    try:
+        top.attributes("-topmost", True)
+        top.transient(master)
+    except tk.TclError:
+        pass
+    result = {"value": None}
+    frame = ttk.Frame(top, padding=12)
+    frame.pack(fill="both", expand=True)
+    ttk.Label(frame, text=prompt).pack(anchor="w")
+    var = tk.StringVar(value=initial)
+    entry = ttk.Entry(frame, textvariable=var, width=36)
+    entry.pack(fill="x", pady=(6, 2))
+    if hint:
+        ttk.Label(frame, text=hint, foreground="#777777").pack(anchor="w")
+
+    def ok(_e=None):
+        result["value"] = var.get()
+        top.destroy()
+
+    def cancel(_e=None):
+        top.destroy()
+
+    row = ttk.Frame(frame)
+    row.pack(fill="x", pady=(10, 0))
+    ttk.Button(row, text="Cancel", command=cancel).pack(side="right")
+    ttk.Button(row, text="OK", command=ok).pack(side="right", padx=6)
+    top.bind("<Return>", ok)
+    top.bind("<Escape>", cancel)
+    top.protocol("WM_DELETE_WINDOW", cancel)
+    try:
+        entry.focus_set()
+        entry.select_range(0, "end")
+        top.grab_set()
+        master.wait_window(top)
+    except tk.TclError:
+        pass
+    return result["value"]

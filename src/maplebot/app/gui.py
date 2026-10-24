@@ -135,6 +135,22 @@ class App:
             self.admin_lbl.config(text="Not running as admin: the game may ignore the bot's keys. "
                                        "Close this and double-click start.bat.")
 
+        # ---- map picker: one saved setup per map
+        mrow = ttk.Frame(outer)
+        mrow.pack(fill="x", pady=(8, 0))
+        ttk.Label(mrow, text="Map:").pack(side="left")
+        self.map_var = tk.StringVar()
+        self.map_combo = ttk.Combobox(mrow, textvariable=self.map_var, state="readonly", width=28)
+        self.map_combo.pack(side="left", padx=(6, 6))
+        self.map_combo.bind("<<ComboboxSelected>>", lambda _e: self._map_selected())
+        self.new_map_btn = ttk.Button(mrow, text="New map…", command=self.new_map)
+        self.new_map_btn.pack(side="left")
+        self.rename_map_btn = ttk.Button(mrow, text="Rename…", command=self.rename_map)
+        self.rename_map_btn.pack(side="left", padx=3)
+        self.delete_map_btn = ttk.Button(mrow, text="Delete", command=self.delete_map)
+        self.delete_map_btn.pack(side="left")
+        self._map_choices = []
+
         self.start_btn = ttk.Button(outer, text=logic.start_button_text(settings),
                                     style="Big.TButton", command=self.start)
         self.start_btn.pack(fill="x", pady=(8, 4))
@@ -190,6 +206,7 @@ class App:
             side="left", expand=True, fill="x", padx=(3, 0))
 
         self._apply_ontop()
+        self._refresh_maps()
         self._refresh_buttons()
         self._refresh_problems()
         root.after(POLL_MS, self._poll)
@@ -210,9 +227,122 @@ class App:
                 probs.append("No mob pictures saved")
             if self.profile.player_template() is None:
                 probs.append("No name tag picture saved")
-        except OSError:
+        except Exception:
             pass
         return probs
+
+    def _map_set_up(self, map_id=None) -> bool:
+        try:
+            return bool(self.profile.map_is_set_up(map_id))
+        except Exception:
+            log.warning("map_is_set_up failed", exc_info=True)
+            return False
+
+    def _refresh_maps(self):
+        """Fill the Map dropdown from the profile."""
+        try:
+            cur = self.profile.current_map
+            choices = logic.map_choices(self.profile.maps(), cur, self.profile.current_map_name(),
+                                        self._map_set_up)
+        except Exception as e:
+            log.exception("listing maps failed")
+            self._show_error(e)
+            return
+        self._map_choices = choices
+        self.map_combo.config(values=[label for _, label in choices])
+        self.map_var.set(next((label for i, label in choices if i == cur), ""))
+
+    def _map_selected(self):
+        map_id = logic.map_label_to_id(self._map_choices, self.map_var.get())
+        if map_id is None or map_id == self.profile.current_map:
+            return
+        if self.running:
+            self._refresh_maps()            # snap back: can't switch while the bot runs
+            return
+        self._switch_to(map_id)
+
+    def _switch_to(self, map_id: str):
+        from tkinter import messagebox
+        self._close_side_windows()
+        try:
+            self.profile.switch_map(map_id)
+            self.settings = self.profile.load()
+        except Exception as e:
+            title, text = logic.friendly_error(e)
+            messagebox.showerror(title, text, parent=self.root)
+        self._refresh_maps()
+        self._refresh_problems()
+
+    def _close_side_windows(self):
+        """The settings window edits the current map; close it before the map changes."""
+        if self.settings_win is not None:
+            try:
+                if self.settings_win.winfo_exists():
+                    self.settings_win.destroy()
+            except Exception:
+                pass
+            self.settings_win = None
+
+    def _ask_map_name(self, title: str, prompt: str, initial: str = ""):
+        from .widgets import ask_text
+        return logic.clean_map_name(ask_text(self.root, title, prompt, initial=initial,
+                                             hint=logic.NEW_MAP_HINT))
+
+    def new_map(self):
+        if self.running:
+            return
+        from tkinter import messagebox
+        name = self._ask_map_name("New map", "Name of the map you want to train on:")
+        if not name:
+            return
+        try:
+            had_setup = self._map_set_up()
+            old_name = self.profile.current_map_name()
+            had_old = any(i == self.profile.current_map for i, _ in self.profile.maps())
+            self._close_side_windows()
+            self.profile.create_map(name)
+            self.settings = self.profile.load()
+        except Exception as e:
+            title, text = logic.friendly_error(e)
+            messagebox.showerror(title, text, parent=self.root)
+            return
+        self._refresh_maps()
+        self._refresh_problems()
+        self.open_wizard(kept_from=old_name if (had_old and had_setup) else None)
+
+    def rename_map(self):
+        if self.running:
+            return
+        from tkinter import messagebox
+        cur_name = self.profile.current_map_name()
+        name = self._ask_map_name("Rename map", "New name for this map:", initial=cur_name)
+        if not name or name == cur_name:
+            return
+        try:
+            self.profile.rename_map(self.profile.current_map, name)
+        except Exception as e:
+            title, text = logic.friendly_error(e)
+            messagebox.showerror(title, text, parent=self.root)
+            return
+        self._refresh_maps()
+
+    def delete_map(self):
+        if self.running:
+            return
+        from tkinter import messagebox
+        name = self.profile.current_map_name()
+        if not messagebox.askyesno("Delete map?", logic.delete_map_question(name), parent=self.root):
+            return
+        try:
+            self._close_side_windows()
+            self.profile.delete_map(self.profile.current_map)
+            self.settings = self.profile.load()
+        except Exception as e:
+            title, text = logic.friendly_error(e)
+            messagebox.showerror(title, text, parent=self.root)
+            return
+        self._refresh_maps()
+        self._refresh_problems()
 
     def _refresh_problems(self):
         probs = self._problems()
@@ -229,23 +359,32 @@ class App:
 
     def _refresh_buttons(self):
         running = self.running
-        can_start = not running and not self._problems()
-        self.start_btn.state(["!disabled"] if can_start else ["disabled"])
+        text, enabled, self._start_action = logic.start_state(
+            self._problems(), self._map_set_up(), running, self.settings)
+        self.start_btn.state(["!disabled"] if enabled else ["disabled"])
+        self.start_btn.config(text=text)
+        self.map_combo.config(state="disabled" if running else "readonly")
+        for b in (self.new_map_btn, self.rename_map_btn, self.delete_map_btn):
+            b.state(["disabled"] if running else ["!disabled"])
         self.pause_btn.state(["!disabled"] if running else ["disabled"])
         self.stop_btn.state(["!disabled"] if running else ["disabled"])
         for b in (self.wizard_btn, self.settings_btn):
             b.state(["disabled"] if running else ["!disabled"])
         paused = bool(self.runner and self.runner.status.paused)
         self.pause_btn.config(text="Resume" if paused else "Pause")
-        self.start_btn.config(text=logic.start_button_text(self.settings))
 
     def _settings_saved(self, s: Settings):
         self.settings = s
         self._refresh_problems()
 
     # ---- buttons -------------------------------------------------------------
+    _start_action = "start"
+
     def start(self):
         if self.running:
+            return
+        if self._start_action == "wizard":
+            self.open_wizard()
             return
         probs = self._problems()
         if probs:
@@ -293,7 +432,7 @@ class App:
             self.runner.stop("Stopped by you")
         self.countdown_lbl.config(text="")
 
-    def open_wizard(self):
+    def open_wizard(self, kept_from=None):
         if self.running:
             return
         if self.wizard is not None and self.wizard.winfo_exists():
@@ -303,7 +442,8 @@ class App:
         # The main window steps aside while the wizard is open (it would sit on top of it).
         self.root.withdraw()
         try:
-            self.wizard = SetupWizard(self.root, self.profile, self.settings, on_saved=self._settings_saved)
+            self.wizard = SetupWizard(self.root, self.profile, self.settings, on_saved=self._settings_saved,
+                                      kept_from=kept_from)
         except Exception:
             self.root.deiconify()
             raise
@@ -314,6 +454,7 @@ class App:
                 if not self._closing:
                     self.root.deiconify()
                     self._apply_ontop()
+                    self._refresh_maps()
                     self._refresh_problems()
         self.wizard.bind("<Destroy>", closed, add="+")
 

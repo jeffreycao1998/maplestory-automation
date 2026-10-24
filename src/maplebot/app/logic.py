@@ -729,8 +729,9 @@ def step_index(key: str) -> int:
     raise KeyError(key)
 
 
-def step_label(i: int) -> str:
-    return f"Step {i + 1} of {len(WIZARD_STEPS)}: {WIZARD_STEPS[i].title}"
+def step_label(i: int, map_name: Optional[str] = None) -> str:
+    text = f"Step {i + 1} of {len(WIZARD_STEPS)}: {WIZARD_STEPS[i].title}"
+    return f"Setting up: {map_name} -- {text}" if map_name else text
 
 
 def validate_box_on_screen(box: Optional[Sequence[int]], size: Optional[Tuple[int, int]],
@@ -1006,6 +1007,8 @@ def friendly_error(exc: BaseException) -> Tuple[str, str]:
     """(title, message) for a dialog. Never a stack trace."""
     name = type(exc).__name__
     text = str(exc).strip()
+    if name == "MapError":
+        return "Map", text or "That can't be done."
     if name == "RunnerError":
         return "Can't start", text or "The bot couldn't start."
     if name == "WindowNotFound":
@@ -1023,3 +1026,85 @@ def friendly_error(exc: BaseException) -> Tuple[str, str]:
         return "Out of memory", f"Your PC ran out of memory. Close other programs and try again.\n{_LOG_HINT}"
     detail = f" ({text})" if text and len(text) < 200 else ""
     return "Something went wrong", f"The bot stopped because of an unexpected problem{detail}.\n\n{_LOG_HINT}"
+
+
+# ---------------------------------------------------------------------------
+# Maps (saved setups per map)
+# ---------------------------------------------------------------------------
+
+NOT_SET_UP = " (not set up)"
+NEW_MAP_HINT = "e.g. The Tree That Grew II"
+
+# Wizard steps whose values carry over when a map is created from another one.
+KEPT_STEPS = ("window", "dot", "player", "bars", "keys")
+
+
+def map_choices(maps: Sequence[Tuple[str, str]], current_id: str, current_name: str,
+                is_set_up) -> List[Tuple[str, str]]:
+    """[(map_id, label)] for the map dropdown. ``is_set_up(map_id) -> bool``.
+
+    A brand-new profile has no saved maps yet; the current (default) map is still listed.
+    """
+    items = list(maps)
+    if current_id not in {i for i, _ in items}:
+        items.append((current_id, current_name))
+    return [(i, n + ("" if is_set_up(i) else NOT_SET_UP)) for i, n in items]
+
+
+def map_label_to_id(choices: Sequence[Tuple[str, str]], label: str) -> Optional[str]:
+    for i, l in choices:
+        if l == label:
+            return i
+    return None
+
+
+def start_state(problems: Sequence[str], map_set_up: bool, running: bool,
+                settings: Settings) -> Tuple[str, bool, str]:
+    """(button text, enabled, action) for the Start button. action: "start" | "wizard"."""
+    if running:
+        return start_button_text(settings), False, "start"
+    if not map_set_up:
+        return "Run the setup wizard for this map", True, "wizard"
+    if problems:
+        return start_button_text(settings), False, "start"
+    return start_button_text(settings), True, "start"
+
+
+def kept_steps(settings: Settings, has_player_template: bool, map_set_up: bool,
+               kept_from: Optional[str]) -> set:
+    """Steps that can be kept as they are because this map was created from another one.
+
+    Only for a map that isn't set up yet. Keys are shared by all maps, so they're always
+    "kept" in that case; the others only if the copied value is actually there.
+    """
+    if map_set_up or not kept_from:
+        return set()
+    c = settings.calibration
+    out = {"keys", "dot"}     # the dot step still checks the colours find you on THIS map
+    if c.window_title:
+        out.add("window")
+    if has_player_template:
+        out.add("player")
+    if c.hp_bar_box:
+        out.add("bars")
+    return out
+
+
+def kept_message(map_name: str) -> str:
+    return f"Kept from your other map ({map_name}) -- click Next to keep it, or Redo to do it again."
+
+
+def wizard_title(map_name: Optional[str]) -> str:
+    return f"Setting up: {map_name}" if map_name else "MapleBot setup"
+
+
+def delete_map_question(name: str) -> str:
+    return f"Delete the setup for {name}? Its mob pictures are deleted too."
+
+
+def clean_map_name(raw: Optional[str]) -> Optional[str]:
+    """Trimmed name, or None if the user cancelled / left it empty."""
+    if raw is None:
+        return None
+    name = " ".join(str(raw).split())
+    return name or None
