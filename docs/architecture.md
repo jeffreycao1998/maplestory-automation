@@ -55,8 +55,10 @@ class InputBackend(Protocol):
     def key_down(self, key: str) -> None
     def key_up(self, key: str) -> None
 class FakeBackend(InputBackend)               # records (t, key, down) events; .held set
-class DirectInputBackend(InputBackend)        # Windows, pydirectinput; imported lazily
-def default_backend() -> InputBackend          # DirectInput on Windows, else raises
+class SendInputBackend(InputBackend)          # Windows, ctypes SendInput with scan codes
+def default_backend() -> InputBackend          # SendInput on Windows, else raises
+def available_keys() -> list[str]              # key names for the GUI
+def normalize_key(name: str) -> str            # aliases -> canonical; ValueError if unknown
 
 # maplebot/controls/controller.py   (re-exported from maplebot.controls)
 class Controller:
