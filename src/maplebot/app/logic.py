@@ -285,7 +285,8 @@ FIELD_INFO: Dict[Tuple[str, str], Tuple[str, str]] = {
     ("calibration", "patrol_left"): ("Patrol left edge (0-1)", "Left end of the training area, as a fraction of the minimap width (0 = far left, 1 = far right)."),
     ("calibration", "patrol_right"): ("Patrol right edge (0-1)", "Right end of the training area, as a fraction of the minimap width. Must be bigger than the left edge."),
     ("calibration", "patrol_y"): ("Training platform height (0-1)", "Height of your training bridge/platform on the minimap (0 = top, 1 = bottom). Recorded automatically when you set the patrol edges in the wizard. Empty = not set."),
-    ("calibration", "patrol_y_tolerance"): ("Platform height tolerance (0-1)", "How far (as a fraction of the minimap height) your dot may be above/below the training platform before the bot thinks you fell off or are on another bridge. Raise it a little if the bridge sags a lot; lower it if bridges are close together."),
+    ("calibration", "patrol_y_tolerance"): ("Platform tolerance below (0-1)", "How far BELOW the training bridge's height (as a fraction of the minimap height) your dot may be before the bot thinks you fell off. Sagging bridges dip in the middle, so this is bigger than the 'above' tolerance. Raise it a little if the bot thinks you fell while you're still on the bridge."),
+    ("calibration", "patrol_y_tolerance_above"): ("Platform tolerance above (0-1)", "How far ABOVE the training bridge's height your dot may be before the bot thinks you're on a higher bridge. Keep it small: both ends of a bridge are at the same height. Also used by the setup wizard to warn when your two patrol edges look like different bridges."),
     ("calibration", "player_dot_hsv_low"): ("Your minimap dot colour, low (H, S, V)", "Darkest colour that still counts as your yellow dot. Set by clicking your dot in the wizard."),
     ("calibration", "player_dot_hsv_high"): ("Your minimap dot colour, high (H, S, V)", "Brightest colour that still counts as your yellow dot. Set by clicking your dot in the wizard."),
     ("detection", "mob_threshold"): ("Mob match strictness (0-1)", "How closely something must look like your mob pictures. Lower (e.g. 0.6) finds more mobs but may see things that aren't there; higher is stricter."),
@@ -333,6 +334,7 @@ FIELD_LIMITS: Dict[Tuple[str, str], Tuple[float, float]] = {
     ("calibration", "patrol_right"): (0.0, 1.0),
     ("calibration", "patrol_y"): (0.0, 1.0),
     ("calibration", "patrol_y_tolerance"): (0.005, 0.5),
+    ("calibration", "patrol_y_tolerance_above"): (0.005, 0.5),
     ("detection", "mob_threshold"): (0.3, 0.99),
     ("detection", "player_threshold"): (0.3, 0.99),
     ("detection", "downscale"): (0.2, 1.0),
@@ -682,10 +684,9 @@ WIZARD_STEPS: List[WizardStep] = [
     WizardStep("mobs", "Mobs",
                "Drag a tight box around one monster (just the monster, as little background as "
                "possible). Add 2-3 pictures of the same monster in different poses for best results."),
-    WizardStep("player", "Name tag (optional)",
-               "Optional: drag a box around your character's name tag under your character. "
-               "This helps the bot know exactly where you are. Click Skip if you're not sure.",
-               optional=True),
+    WizardStep("player", "Your name tag",
+               "Drag a tight box around the name tag under YOUR character -- the bot uses it to "
+               "know exactly where you are. Just the name, not other players' tags."),
     WizardStep("bars", "HP and MP bars",
                "Drag a box along your red HP bar (required: the bot stops before your character "
                "dies), then your blue MP bar (recommended for magicians: it lets the bot drink MP "
@@ -713,6 +714,7 @@ class WizardContext:
     screenshot_size: Optional[Tuple[int, int]] = None   # (w, h) of the current screenshot
     dot_pos: Optional[Tuple[float, float]] = None       # dot seen with the current colours
     n_mob_templates: int = 0
+    has_player_template: bool = False      # profile/templates/player.png exists
     patrol_left_set: Optional[float] = None
     patrol_right_set: Optional[float] = None
     patrol_preset: bool = False     # profile already had patrol edges -> may keep them
@@ -790,11 +792,32 @@ def combine_patrol_y(left_y: Optional[float], right_y: Optional[float],
     return round(sum(ys) / len(ys), 3)
 
 
+PATROL_Y_TOLERANCE_ABOVE_DEFAULT = 0.03
+
+
+def tolerance_above(calibration) -> float:
+    """calibration.patrol_y_tolerance_above, or its default if settings predate it."""
+    v = getattr(calibration, "patrol_y_tolerance_above", None)
+    return PATROL_Y_TOLERANCE_ABOVE_DEFAULT if v is None else float(v)
+
+
+def patrol_band(calibration) -> Optional[Tuple[float, float]]:
+    """(top, bottom) minimap-y fractions where the bot counts you as on the training
+    platform: patrol_y - tolerance_above .. patrol_y + tolerance (below). None if unset."""
+    y = getattr(calibration, "patrol_y", None)
+    if y is None:
+        return None
+    return (max(0.0, y - tolerance_above(calibration)),
+            min(1.0, y + float(calibration.patrol_y_tolerance)))
+
+
 def patrol_y_warning(left_y: Optional[float], right_y: Optional[float], tolerance: float,
                      existing: Optional[float] = None) -> Optional[str]:
     """Warning if the two edge readings look like different bridges/platforms.
 
-    With only one reading this time, it is compared with the previously saved patrol_y.
+    ``tolerance`` should be patrol_y_tolerance_above: both ends of one bridge are at the
+    same height, so they should agree closely. With only one reading this time, it is
+    compared with the previously saved patrol_y.
     """
     if left_y is not None and right_y is not None:
         a, b = left_y, right_y
@@ -850,6 +873,9 @@ def step_problem(key: str, ctx: WizardContext) -> Optional[str]:
             return "Drag a box around at least one monster."
         return None
     if key == "player":
+        if not ctx.has_player_template:
+            return ("Drag a box around the name tag under your character. It's required: "
+                    "without it the bot can't tell exactly where you are and won't attack.")
         return None
     if key == "bars":
         if not c.hp_bar_box:
@@ -870,22 +896,27 @@ def step_problem(key: str, ctx: WizardContext) -> Optional[str]:
         probs = list(ctx.settings.problems())
         if ctx.n_mob_templates <= 0:
             probs.append("No mob pictures saved (step 5)")
+        if not ctx.has_player_template:
+            probs.append("No name tag picture saved (step 6)")
         return ("Not finished yet: " + "; ".join(probs) + ".") if probs else None
     return None
 
 
-def summary_lines(ctx: WizardContext, player_template: bool) -> List[str]:
+def summary_lines(ctx: WizardContext, player_template: Optional[bool] = None) -> List[str]:
     from maplebot.app.keymap import display_name
 
     s = ctx.settings
     c, k = s.calibration, s.keys
+    if player_template is None:
+        player_template = ctx.has_player_template
+
     def box(b):
         return "not set" if not b else f"{b[2]} x {b[3]} at ({b[0]}, {b[1]})"
     return [
         f"Game window: '{c.window_title}'" + (f" ({ctx.window_box[2]} x {ctx.window_box[3]})" if ctx.window_box else ""),
         f"Minimap: {box(c.minimap_box)}",
         f"Mob pictures: {ctx.n_mob_templates}",
-        f"Name tag picture: {'yes' if player_template else 'no (optional)'}",
+        f"Name tag picture: {'yes' if player_template else 'NOT SET (required)'}",
         f"HP bar: {box(c.hp_bar_box) if c.hp_bar_box else 'NOT SET (required)'}",
         f"MP bar: {box(c.mp_bar_box) if c.mp_bar_box else 'not set (recommended for magicians)'}",
         f"Training area: {c.patrol_left:.2f} to {c.patrol_right:.2f} across the minimap"
@@ -953,6 +984,14 @@ def countdown_text(st) -> str:
         return f"Starting in {math.ceil(cd - 1e-9)}... click into the game"
     msg = getattr(st, "message", "") or ""
     return msg if is_countdown(msg) else ""
+
+
+def hotkey_badge(st, settings: Settings) -> str:
+    """Persistent warning while the pause/stop hotkeys don't work ("" when fine)."""
+    if not getattr(st, "running", False) or getattr(st, "hotkeys_ok", True):
+        return ""
+    return (f"{settings.safety.pause_hotkey.upper()}/{settings.safety.stop_hotkey.upper()} "
+            "not working -- use the buttons")
 
 
 def start_button_text(settings: Settings) -> str:

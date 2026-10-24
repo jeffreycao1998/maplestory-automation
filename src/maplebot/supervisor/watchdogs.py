@@ -1,8 +1,9 @@
 """
 Watchdogs that force the bot to PAUSE or STOP.
 
-The Supervisor reads only `Perception`, `Decision` history and the clock, so it can be
-driven by hand-built sequences and replays. All thresholds come from
+The Supervisor reads only `Perception`, `Decision` history (for stuck-jumps), the
+map model built from settings, and the clock, so it can be driven by hand-built
+sequences and replays. All thresholds come from
 `settings.safety`. Every verdict carries a specific, friendly reason that the user
 reads in the app.
 
@@ -21,6 +22,7 @@ import logging
 from collections import deque
 from typing import Deque, Optional
 
+from maplebot.mapmodel import MapModel
 from maplebot.settings import Settings
 from maplebot.types import Action, Decision, Flag, Perception, Verdict, VerdictKind
 
@@ -30,7 +32,6 @@ log = logging.getLogger(__name__)
 # getattr so promoting them to settings needs no code change here.
 DEFAULT_STUCK_WINDOW_S = 60.0     # stuck-jumps are counted over this sliding window
 DEFAULT_HP_CRITICAL_HOLD_S = 1.0  # HP must stay critical this long before STOP
-OFF_PLATFORM_STATE = "OFF_PLATFORM"
 
 _OK = Verdict(VerdictKind.OK)
 _RANK = {VerdictKind.OK: 0, VerdictKind.PAUSE: 1, VerdictKind.STOP: 2}
@@ -94,7 +95,10 @@ class Supervisor:
         self._hp_low = _Since()
         self._low_conf = _Since()
         self._hp_unreadable = _Since()
-        self._off_platform = _Since()     # fed by note_decision
+        self._off_platform = _Since()     # player_map y outside the training platform band
+        self._map: Optional[MapModel] = None
+        self._map_error: str = ""
+        self._build_map()
         self._stuck_jumps: Deque[float] = deque()
 
     # ---- lifecycle ------------------------------------------------------
@@ -119,6 +123,18 @@ class Supervisor:
     def update_settings(self, settings: Settings) -> None:
         """New thresholds apply from the next check; running timers are kept."""
         self.settings = settings
+        self._build_map()
+
+    def _build_map(self) -> None:
+        """The platform watchdog is off when calibration.patrol_y is None."""
+        self._map, self._map_error = None, ""
+        if getattr(self.settings.calibration, "patrol_y", None) is None:
+            return
+        try:
+            self._map = MapModel.from_settings(self.settings)
+        except Exception as e:  # invalid patrol setup: refuse to run blind (see _check)
+            log.warning("Supervisor couldn't build the map model: %s", e)
+            self._map_error = str(e) or type(e).__name__
 
     @property
     def stuck_window_s(self) -> float:
@@ -145,8 +161,6 @@ class Supervisor:
             state = str(d.state).upper()
             if state == "STUCK" and d.action == Action.JUMP:
                 self._stuck_jumps.append(now)
-            # OFF_PLATFORM must hold over consecutive decisions; any other state clears it.
-            self._off_platform.update(state == OFF_PLATFORM_STATE, now)
         except Exception:  # never let bookkeeping crash the loop
             log.exception("Supervisor.note_decision failed")
 
@@ -181,7 +195,16 @@ class Supervisor:
         else:
             hp_low_for = 0.0
         hp_unreadable_for = self._hp_unreadable.update(hp is None, now)
-        off_platform_for = self._off_platform.held(now)
+        # Platform: computed from the minimap dot, independent of behaviour state.
+        # Off → timer runs; on → timer clears; unknown position → neither (player-lost
+        # covers a missing dot).
+        off_platform_for = 0.0
+        if self._map is not None and p.player_map is not None:
+            x, y = p.player_map
+            off_platform_for = self._off_platform.update(
+                not self._map.on_platform(float(x), float(y)), now)
+        elif self._map is not None:
+            off_platform_for = self._off_platform.held(now)
         hold_s = self.hp_critical_hold_s
         window_s = self.stuck_window_s
 
@@ -215,6 +238,11 @@ class Supervisor:
                 f"Can't read your HP bar for {_fmt_duration(s.hp_unreadable_pause_s)} — the "
                 "bot can't tell if your character is in danger. Check nothing covers the HP "
                 "bar, or redo that setup step."))
+        if self._map_error:
+            found.append(Verdict(
+                VerdictKind.PAUSE,
+                f"The training platform settings can't be used ({self._map_error}) — the "
+                "bot can't tell if your character fell off. Redo the patrol setup step."))
         if self._off_platform.since is not None and off_platform_for >= s.platform_lost_s:
             found.append(Verdict(
                 VerdictKind.PAUSE,

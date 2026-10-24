@@ -25,9 +25,10 @@ Rules, in priority order (first match wins):
     WAIT     no minimap position                          -> STOP_WALK if walking else IDLE
     ENGAGE   mob in skill range on screen (or seen < 0.6 s ago)  -> STOP_WALK / FACE_* / ATTACK / IDLE
              (won't turn toward a mob behind while one ahead was seen < 0.3 s ago)
-    OFF_PLATFORM  patrol_y set and minimap y outside patrol_y +- tolerance
+    OFF_PLATFORM  patrol_y set and minimap y outside
+                [patrol_y - tolerance_above, patrol_y + tolerance(below)]  (MapModel.on_platform)
              -> IDLE (never starts a walk); a walk already under way is stopped
-                (STOP_WALK) once y has been off for OFF_PLATFORM_DEBOUNCE_S
+                (STOP_WALK) once y has been off for behavior.off_platform_debounce_s
     PATROL   edges, approach visible mob, keep direction  -> WALK_* on change, else
     STUCK    still walking the same way, minimap x flat for stuck_s -> JUMP, else IDLE
 
@@ -60,7 +61,7 @@ LINGER_S = 0.6              # stay in ENGAGE this long after the last in-range s
 STUCK_EPS = 0.004           # minimap x must move more than this to count as moving
 TARGET_SWITCH_MARGIN_PX = 40  # a mob behind us must be this much nearer to make us turn
 TURN_HOLD_S = 0.3           # don't turn away from a mob seen ahead within this long
-OFF_PLATFORM_DEBOUNCE_S = 0.2  # y out of band this long before we stop (1-px dot jitter)
+OFF_PLATFORM_DEBOUNCE_S = 0.2  # default for settings.behavior.off_platform_debounce_s
 
 LEFT, RIGHT = "left", "right"
 
@@ -101,11 +102,10 @@ class Behavior:
         self._off_since: Optional[float] = None  # first tick y was off the training band
 
     def update_settings(self, settings: Settings) -> None:
-        """Take new settings. Rebuilds the map model if the patrol bounds changed
-        (raises ValueError, leaving everything unchanged, if they are invalid)."""
-        c = settings.calibration
-        if (c.patrol_left, c.patrol_right) != (self.map.patrol_left, self.map.patrol_right):
-            self.map = MapModel.from_settings(settings)
+        """Take new settings and rebuild the map model from them (patrol x bounds and
+        height band). Raises ValueError, leaving everything unchanged, if invalid."""
+        new_map = MapModel.from_settings(settings)
+        self.map = new_map
         self.settings = settings
 
     def decide(self, p: Perception, now: float) -> Decision:
@@ -202,7 +202,9 @@ class Behavior:
         why = f"not on the training bridge (y {y:.2f} vs {m.patrol_y:.2f})"
         if not self.walking:
             return Decision(Action.IDLE, "OFF_PLATFORM", reason=why)   # never start a walk
-        if now - self._off_since < OFF_PLATFORM_DEBOUNCE_S:
+        debounce = getattr(self.settings.behavior, "off_platform_debounce_s",
+                           OFF_PLATFORM_DEBOUNCE_S)
+        if now - self._off_since < debounce:
             return None                  # maybe 1-px dot jitter: keep the walk going a moment
         return Decision(Action.STOP_WALK, "OFF_PLATFORM", reason=why)
 

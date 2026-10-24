@@ -299,55 +299,116 @@ def test_hp_unreadable_reset_clears(sup):
     assert first_non_ok(run(sup, 9.5, 19.4, hp=None)) is None
 
 
-# ---- off platform --------------------------------------------------------------------------
-def off_platform():
-    return Decision(Action.IDLE, "OFF_PLATFORM", reason="minimap y below platform")
+# ---- off platform (computed from player_map vs calibration.patrol_y) --------------------
+PATROL_Y = 0.50          # minimap y grows downwards; bridges sag down (larger y)
+ON = (0.5, 0.50)
+SAG = (0.62, 0.56)       # sagging bridge middle, still within patrol_y + tolerance (0.08)
+FELL = (0.5, 0.62)       # next bridge down (~0.11 below)
 
 
-def drive(sup, start, end, decision):
-    """Runner order: check() then note_decision() each tick."""
+def platform_sup(**safety):
+    s = make_settings(**safety)
+    s.calibration.patrol_y = PATROL_Y
+    s.calibration.patrol_y_tolerance = 0.08
+    sup = Supervisor(s)
+    sup.start(0.0)
+    return sup
+
+
+def drive(sup, start, end, player, decisions):
+    """Runner order each tick: check() then note_decision(); decisions cycle."""
     out = []
     for i in range(int(round((end - start) / DT))):
         t = round(start + i * DT, 6)
-        out.append((t, sup.check(make_p(t), t)))
-        sup.note_decision(decision, t)
+        out.append((t, sup.check(make_p(t, player=player), t)))
+        sup.note_decision(decisions[i % len(decisions)], t)
     return out
 
 
-def test_off_platform_triggers_pause(sup):
-    drive(sup, 0, 1, Decision(Action.WALK_LEFT, "PATROL"))
-    res = drive(sup, 1.0, 3.5, off_platform())
+ENGAGE = Decision(Action.ATTACK, "ENGAGE", reason="slime in range")
+OFFP = Decision(Action.IDLE, "OFF_PLATFORM", reason="below platform")
+PATROL = Decision(Action.WALK_LEFT, "PATROL")
+
+
+def test_fall_with_alternating_engage_still_pauses_at_2s():
+    sup = platform_sup()
+    drive(sup, 0, 1, ON, [PATROL])
+    res = drive(sup, 1.0, 4.0, FELL, [ENGAGE, OFFP])     # mobs on the lower bridge
     t, v = first_non_ok(res)
-    # first OFF_PLATFORM noted at 1.0 → 2.0 s held at the check on t=3.0
     assert v.kind == VerdictKind.PAUSE and t == pytest.approx(3.0)
     assert v.reason == ("Your character isn't on the training platform any more — it may "
                         "have fallen to another bridge. Move it back and resume.")
 
 
-def test_off_platform_just_under_threshold_ok(sup):
-    res = drive(sup, 0, 2.0, off_platform())       # held 1.9 s at last check
-    assert first_non_ok(res) is None
+def test_fall_pauses_regardless_of_decisions():
+    sup = platform_sup()
+    t, v = first_non_ok(drive(sup, 0, 3, FELL, [ENGAGE]))
+    assert v.kind == VerdictKind.PAUSE and t == pytest.approx(2.0)
 
 
-def test_off_platform_interrupted_ok(sup):
-    drive(sup, 0, 1.8, off_platform())
-    drive(sup, 1.8, 1.9, Decision(Action.WALK_RIGHT, "RECOVER"))  # back on platform
-    assert first_non_ok(drive(sup, 1.9, 3.8, off_platform())) is None
+def test_sagging_bridge_on_platform_never_pauses():
+    sup = platform_sup()
+    xs = [0.3, 0.4, 0.5, 0.6, 0.7]
+    for i in range(600):                               # 60 s walking along the sag
+        t = round(i * DT, 6)
+        x = xs[i % len(xs)]
+        y = 0.50 + 0.06 * (1 - abs(x - 0.5) / 0.2)     # 0.50 at the ends, 0.56 mid-span
+        assert sup.check(make_p(t, player=(x, y)), t).kind == VerdictKind.OK
+        sup.note_decision(OFFP if i % 2 else ENGAGE, t)  # decision state is ignored
 
 
-def test_off_platform_without_decisions_never_triggers(sup):
-    sup.note_decision(off_platform(), 0.0)
-    sup.note_decision(Decision(Action.IDLE, "PATROL"), 0.1)
-    assert first_non_ok(run(sup, 0.2, 20)) is None
+def test_off_platform_just_under_threshold_ok():
+    sup = platform_sup()
+    assert first_non_ok(drive(sup, 0, 2.0, FELL, [ENGAGE])) is None   # 1.9 s
 
 
-def test_off_platform_reset_clears(sup):
-    drive(sup, 0, 1.9, off_platform())
+def test_off_platform_back_on_clears_timer():
+    sup = platform_sup()
+    drive(sup, 0, 1.8, FELL, [ENGAGE])
+    drive(sup, 1.8, 1.9, SAG, [ENGAGE])                 # climbed back
+    assert first_non_ok(drive(sup, 1.9, 3.8, FELL, [ENGAGE])) is None
+
+
+def test_unknown_position_neither_starts_nor_clears():
+    sup = platform_sup(player_lost_s=30.0)
+    # dot missing from the start: platform timer never starts
+    assert first_non_ok(drive(sup, 0, 5, None, [ENGAGE])) is None
+    # fell, then dot flickers out: the timer is not cleared
+    drive(sup, 5.0, 6.0, FELL, [ENGAGE])
+    drive(sup, 6.0, 6.5, None, [ENGAGE])
+    t, v = first_non_ok(drive(sup, 6.5, 8.0, FELL, [ENGAGE]))
+    assert v.kind == VerdictKind.PAUSE and t == pytest.approx(7.0)
+
+
+def test_off_platform_disabled_without_patrol_y(sup):
+    assert sup.settings.calibration.patrol_y is None
+    assert first_non_ok(drive(sup, 0, 20, FELL, [OFFP])) is None
+
+
+def test_off_platform_reset_clears():
+    sup = platform_sup()
+    drive(sup, 0, 1.9, FELL, [ENGAGE])
     sup.reset(1.9)
-    assert sup.check(make_p(2.5), 2.5).kind == VerdictKind.OK
-    sup.note_decision(off_platform(), 2.5)
-    assert sup.check(make_p(4.4), 4.4).kind == VerdictKind.OK
-    assert sup.check(make_p(4.5), 4.5).kind == VerdictKind.PAUSE
+    assert first_non_ok(drive(sup, 1.9, 3.8, FELL, [ENGAGE])) is None
+    assert sup.check(make_p(3.9, player=FELL), 3.9).kind == VerdictKind.PAUSE
+
+
+def test_update_settings_enables_platform_watchdog(sup):
+    assert first_non_ok(drive(sup, 0, 3, FELL, [ENGAGE])) is None
+    s = make_settings()
+    s.calibration.patrol_y = PATROL_Y
+    sup.update_settings(s)
+    assert first_non_ok(drive(sup, 3.0, 4.9, FELL, [ENGAGE])) is None
+    assert sup.check(make_p(5.0, player=FELL), 5.0).kind == VerdictKind.PAUSE
+
+
+def test_invalid_patrol_setup_pauses():
+    s = make_settings()
+    s.calibration.patrol_y = 1.7                       # MapModel rejects it
+    sup = Supervisor(s)
+    sup.start(0.0)
+    v = sup.check(make_p(0.0), 0.0)
+    assert v.kind == VerdictKind.PAUSE and "Redo the patrol setup step" in v.reason
 
 
 # ---- promotable constants via getattr ------------------------------------------------------
