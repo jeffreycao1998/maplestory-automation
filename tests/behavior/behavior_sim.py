@@ -8,8 +8,10 @@ Only mobs within half a screen width are visible. Minimap x = player_wx / world_
 Minimap y models a sagging rope bridge (The Tree That Grew II): anchors at minimap x
 `bridge` = (left, right) at height `bridge_y`, sagging by `sag` (minimap fraction) to the
 middle in a parabola, quantised to whole minimap pixels (`minimap_h` px tall) like the
-real dot. `fall_at` = t: the character drops to the bridge below (+`bridge_gap`) and
-stays there. The character's true facing at start is `start_facing` (random by seed if
+real dot. Defaults follow the real minimap (112 px): sag 0.063-0.071, next bridge 0.117
+lower. `patrol_y` = how calibration.patrol_y is set: "end" (wizard: dot y at the patrol
+edges), "mid" (middle of the walked y range) or None. `fall_at` = t: the character
+drops to the bridge below (+`bridge_gap`) and stays there. The character's true facing at start is `start_facing` (random by seed if
 None): the bot doesn't know it. `y_jitter` = chance per frame the dot reads 1 px off.
 
 Controller semantics are mirrored exactly (WALK_* sets facing+walking, STOP_WALK clears
@@ -76,8 +78,8 @@ def simulate(seed: int = 1, duration_s: float = 60.0, hz: float = 15.0,
              settings: Optional[Settings] = None,
              start_facing: Optional[str] = None,
              bridge: Tuple[float, float] = (0.28, 0.72), bridge_y: float = 0.40,
-             sag: float = 0.07, minimap_h: int = 112, bridge_gap: float = 0.11,
-             patrol_y: Optional[str] = "mid",
+             sag: float = 0.07, minimap_h: int = 112, bridge_gap: float = 0.117,
+             patrol_y: Optional[str] = "end",
              fall_at: Optional[float] = None, y_jitter: float = 0.0) -> SimResult:
     """`obstacle` = (start_wx, end_wx): walking stalls there until a JUMP carries the
     player over it. `miss_rate` = chance per frame that a visible mob is not detected."""
@@ -90,14 +92,18 @@ def simulate(seed: int = 1, duration_s: float = 60.0, hz: float = 15.0,
         u = min(1.0, abs(mx - bc) / bh)
         return bridge_y + sag * (1 - u * u)
 
-    if patrol_y == "mid":
-        # what the setup wizard should store: middle of the y range seen walking the zone
+    if patrol_y == "end":
+        # what the setup wizard stores: the dot y at the patrol edges, quantised like the
+        # real dot. With the default bridge the edges sit near the anchored ends, i.e.
+        # the TOP of the sag; walking to the middle moves the dot down by ~sag.
+        ys = [bridge_y_at(e) for e in (s.calibration.patrol_left, s.calibration.patrol_right)]
+        s.calibration.patrol_y = round(min(ys) * minimap_h) / minimap_h
+    elif patrol_y == "mid":
+        # alternative: middle of the y range seen walking the zone
         ys = [bridge_y_at(s.calibration.patrol_left + i / 200 *
                           (s.calibration.patrol_right - s.calibration.patrol_left))
               for i in range(201)]
         s.calibration.patrol_y = (min(ys) + max(ys)) / 2
-    elif patrol_y == "end":
-        s.calibration.patrol_y = bridge_y_at(s.calibration.patrol_left)
     else:
         s.calibration.patrol_y = None
     b = Behavior(s, MapModel.from_settings(s))

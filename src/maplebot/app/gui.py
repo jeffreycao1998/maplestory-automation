@@ -147,6 +147,10 @@ class App:
 
         self.countdown_lbl = ttk.Label(outer, style="Countdown.TLabel")
         self.countdown_lbl.pack(pady=(6, 0))
+        # Persistent while the runner reports hotkeys_ok=False (packed only then).
+        self.hotkey_badge = tk.Label(outer, text="", background="#c00000", foreground="white",
+                                     font=("Segoe UI", 10, "bold"), padx=8, pady=4)
+        self._badge_shown = False
         self.problems_lbl = ttk.Label(outer, style="Problem.TLabel", wraplength=PREVIEW_W, justify="left")
         self.problems_lbl.pack(fill="x")
 
@@ -367,7 +371,18 @@ class App:
             elif k in self.vals:
                 self.vals[k].config(text=v)
         self.countdown_lbl.config(text=logic.countdown_text(st))
+        self._set_badge(logic.hotkey_badge(st, self.settings))
         self._refresh_buttons()
+
+    def _set_badge(self, text: str):
+        if text:
+            self.hotkey_badge.config(text=text)
+            if not self._badge_shown:
+                self.hotkey_badge.pack(after=self.countdown_lbl, fill="x", pady=(4, 0))
+                self._badge_shown = True
+        elif self._badge_shown:
+            self.hotkey_badge.pack_forget()
+            self._badge_shown = False
 
     def _show_preview(self):
         with self._preview_lock:
@@ -397,6 +412,7 @@ class App:
     def _on_done(self):
         log.info("bot thread finished")
         self.countdown_lbl.config(text="")
+        self._set_badge("")
         if self.thread is not None:
             self.thread.join(timeout=0.5)
         self.thread = None
@@ -433,11 +449,39 @@ def _fatal(title: str, text: str) -> None:
     try:
         if sys.platform == "win32":
             import ctypes
-            ctypes.windll.user32.MessageBoxW(None, text, title, 0x10)
+            ctypes.windll.user32.MessageBoxW(None, text, title, 0x40 if "already open" in text else 0x10)
             return
     except Exception:
         pass
     print(f"{title}: {text}", file=sys.stderr or sys.__stdout__)
+
+
+class AlreadyRunning(RuntimeError):
+    """Another copy of the app holds the lock."""
+
+
+def acquire_single_instance(logs_dir: Path):
+    """Hold an exclusive lock on logs/app.lock for the life of the process.
+
+    Returns the open file (keep a reference). Raises AlreadyRunning if another copy holds
+    it. The OS drops the lock when the process exits or crashes, so a stale file never
+    blocks a restart.
+    """
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    path = logs_dir / "app.lock"
+    f = open(path, "a+b")
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        raise AlreadyRunning("The bot is already open.") from None
+    return f
 
 
 def write_pid_file(logs_dir: Path) -> Path:
@@ -462,8 +506,21 @@ def write_pid_file(logs_dir: Path) -> Path:
     return path
 
 
+_instance_lock = None
+
+
 def main() -> None:
+    global _instance_lock
     profile = Profile.default()
+    try:
+        _instance_lock = acquire_single_instance(profile.logs_dir)
+    except AlreadyRunning:
+        # Don't touch app.pid / app.log: they belong to the copy that's open.
+        _fatal("MapleBot", "The bot is already open. Look for the MapleBot window "
+                           "(it may be behind the game or minimised to the taskbar).")
+        raise SystemExit(3)
+    except OSError:
+        _instance_lock = None          # can't lock (odd file system): carry on without the guard
     write_pid_file(profile.logs_dir)
     logfile = setup_logging(profile.logs_dir)
     log.info("MapleBot starting (python %s, %s)", sys.version.split()[0], sys.platform)

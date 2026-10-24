@@ -37,6 +37,7 @@ class SetupWizard(tk.Toplevel):
         self.hide_also = hide_also or [master]
         self.ctx = WizardContext(settings=Settings.from_dict(settings.to_dict()))
         self.ctx.n_mob_templates = len(profile.mob_templates())
+        self.ctx.has_player_template = profile.player_template() is not None
         # A profile that was set up before keeps its patrol edges unless the user changes them.
         self.ctx.patrol_preset = profile.settings_path.exists() and bool(settings.calibration.minimap_box)
         self.session_boxes: list = []  # mob boxes drawn on the current screenshot
@@ -125,7 +126,7 @@ class SetupWizard(tk.Toplevel):
         if self.key() == "patrol":
             c = self.s.calibration
             warn = logic.patrol_y_warning(self.ctx.patrol_left_y, self.ctx.patrol_right_y,
-                                          c.patrol_y_tolerance)
+                                          logic.tolerance_above(c))
             if warn and not messagebox.askyesno("Different bridges?", warn + "\n\nContinue anyway?",
                                                 parent=self):
                 return
@@ -508,9 +509,13 @@ class SetupWizard(tk.Toplevel):
             w.destroy()
         self._thumbs = []
         p = self.profile.player_template()
+        self.ctx.has_player_template = p is not None
         if p:
             ttk.Label(self.thumb_row, text="Saved name tag:").pack(side="left", padx=(0, 6))
             self._thumb(self.thumb_row, p, lambda: self._delete_player(p))
+        else:
+            ttk.Label(self.thumb_row, foreground="#777777",
+                      text="No name tag saved yet (required).").pack(side="left")
 
     def _got_player(self, box):
         if box is None:
@@ -520,6 +525,10 @@ class SetupWizard(tk.Toplevel):
                                                min_w=10, min_h=6, max_fraction=0.05)
         if problem:
             self.error(problem)
+            return
+        mm = self.s.calibration.minimap_box
+        if mm and _overlaps(box, mm):
+            self.error("That box is on the minimap. Draw it around the name tag under your character.")
             return
         try:
             logic.save_crop(self.image, box, self.profile.templates_dir / "player.png")
@@ -674,7 +683,7 @@ class SetupWizard(tk.Toplevel):
             l, r = self.ctx.patrol_left_set, self.ctx.patrol_right_set
             problem = logic.validate_patrol(l, r) if (l is not None and r is not None) else None
             bridge = logic.patrol_y_warning(self.ctx.patrol_left_y, self.ctx.patrol_right_y,
-                                            c.patrol_y_tolerance, previous_y)
+                                            logic.tolerance_above(c), previous_y)
             if problem:
                 self.error(problem)
             elif bridge:
@@ -695,10 +704,9 @@ class SetupWizard(tk.Toplevel):
         c = self.s.calibration
         x, y, w, h = c.minimap_box
         ovs = [("box", tuple(c.minimap_box), CYAN, "")]
-        if c.patrol_y is not None:
-            tol = c.patrol_y_tolerance
-            y0 = y + max(0.0, c.patrol_y - tol) * h
-            y1 = y + min(1.0, c.patrol_y + tol) * h
+        band = logic.patrol_band(c)
+        if band is not None:
+            y0, y1 = y + band[0] * h, y + band[1] * h
         else:
             y0, y1 = y, y + h
         for frac in (c.patrol_left, c.patrol_right):
@@ -785,7 +793,8 @@ class SetupWizard(tk.Toplevel):
                 pass
         box = ttk.LabelFrame(f, text="Your setup", padding=10)
         box.pack(fill="x", pady=6)
-        for line in logic.summary_lines(self.ctx, self.profile.player_template() is not None):
+        self.ctx.has_player_template = self.profile.player_template() is not None
+        for line in logic.summary_lines(self.ctx):
             ttk.Label(box, text=line).pack(anchor="w", pady=1)
         problem = logic.step_problem("summary", self.ctx)
         if problem:

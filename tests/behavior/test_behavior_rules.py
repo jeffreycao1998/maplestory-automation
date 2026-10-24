@@ -600,7 +600,11 @@ def test_estimated_position_stops_running_engagement():
 
 # ---------------------------------------------------------------- OFF_PLATFORM
 def onplat(**kw):
-    return make_behavior(calibration__patrol_y=0.45, calibration__patrol_y_tolerance=0.04, **kw)
+    """Training bridge at y 0.45 with an explicit asymmetric band: 0.03 above, 0.10 below."""
+    b = make_behavior(calibration__patrol_y=0.45, calibration__patrol_y_tolerance=0.10, **kw)
+    b.settings.calibration.patrol_y_tolerance_above = 0.03
+    b.update_settings(b.settings)
+    return b
 
 
 def test_off_platform_stops_walking_then_idles():
@@ -625,19 +629,42 @@ def test_off_platform_from_standstill_never_walks():
 def test_off_platform_single_jitter_tick_ignored():
     b = onplat()
     b.decide(perc(map_y=0.45), 0.0)
-    for i, y in enumerate([0.45, 0.50, 0.45, 0.50, 0.45]):
+    for i, y in enumerate([0.45, 0.60, 0.45, 0.60, 0.45]):
         d = b.decide(perc(map_y=y), 0.07 * (i + 1))
         assert d.state == "PATROL"
 
 
-def test_tolerance_edges():
+def test_tolerance_edges_asymmetric():
     m = onplat().map
-    assert m.on_platform(0.5, 0.4899) and m.on_platform(0.5, 0.4101)   # 0.0399 off
-    assert not m.on_platform(0.5, 0.4901) and not m.on_platform(0.5, 0.4099)
+    assert m.on_platform(0.5, 0.5499) and m.on_platform(0.5, 0.4201)   # inside the band
+    assert not m.on_platform(0.5, 0.5501) and not m.on_platform(0.5, 0.4199)
     b = onplat()                                   # standing: decided on the first tick
-    assert b.decide(perc(map_y=0.4899), 0.0).state == "PATROL"
+    assert b.decide(perc(map_y=0.5499), 0.0).state == "PATROL"      # sagging middle
     b = onplat()
-    assert b.decide(perc(map_y=0.4901), 0.0).state == "OFF_PLATFORM"
+    assert b.decide(perc(map_y=0.5501), 0.0).state == "OFF_PLATFORM"
+    b = onplat()
+    assert b.decide(perc(map_y=0.4199), 0.0).state == "OFF_PLATFORM"   # above: tight
+
+
+def test_off_platform_debounce_from_settings():
+    b = onplat()
+    b.settings.behavior.off_platform_debounce_s = 1.0
+    assert b.decide(perc(map_y=0.45), 0.0).action is A.WALK_RIGHT
+    assert b.decide(perc(map_y=0.62), 0.1).state == "PATROL"
+    assert b.decide(perc(map_y=0.62), 1.0).state == "PATROL"           # 0.9 s < 1.0 s
+    d = b.decide(perc(map_y=0.62), 1.1)
+    assert (d.action, d.state) == (A.STOP_WALK, "OFF_PLATFORM")
+
+
+def test_update_settings_picks_up_new_height_band():
+    b = make_behavior()
+    assert b.decide(perc(map_y=0.9), 0.0).state == "PATROL"
+    s = make_settings(calibration__patrol_y=0.45)
+    b.update_settings(s)
+    assert b.map.patrol_y == 0.45
+    assert b.decide(perc(map_y=0.9), 1.0).state == "PATROL"          # walking: debounce
+    d = b.decide(perc(map_y=0.9), 1.3)
+    assert (d.action, d.state) == (A.STOP_WALK, "OFF_PLATFORM")
 
 
 def test_off_platform_from_standstill_idles_immediately():

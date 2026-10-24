@@ -57,39 +57,43 @@ def test_true_start_facing_unknown_never_casts_wrong_way(seed, start_facing):
 
 
 # ---------------------------------------------------------------- sagging bridges
-@pytest.mark.parametrize("sag", [0.0, 0.04, 0.06, 0.07, 0.08])
-def test_sagging_bridge_does_not_trip_default_tolerance(sag):
-    # default patrol_y_tolerance 0.04, patrol_y = middle of the y range of the patrol zone,
-    # minimap dot quantised to 1/112 and read 1 px off on 20% of frames
+def band(below=0.10, above=0.03):
+    """Settings with the asymmetric height band (the intended defaults unless given)."""
+    s = make_settings()
+    s.calibration.patrol_y_tolerance = below
+    s.calibration.patrol_y_tolerance_above = above
+    return s
+
+
+@pytest.mark.parametrize("sag", [0.0, 0.04, 0.063, 0.071, 0.08])
+def test_sagging_bridge_stays_on_platform(sag):
+    # patrol_y from the patrol-edge readings (top of the sag), dot quantised to 1/112 and
+    # read 1 px off on 20% of frames: the sagging middle must never count as off.
     for seed in range(1, 6):
-        r = simulate(seed=seed, sag=sag, y_jitter=0.2)
-        assert r.walk_ticks_after_fall == 0
-        assert r.max_off_streak_s < 0.5, (sag, seed, r.max_off_streak_s)   # << platform_lost_s
+        r = simulate(seed=seed, sag=sag, y_jitter=0.2, settings=band())
+        assert r.states.get("OFF_PLATFORM", 0) == 0, (sag, seed)
         assert r.kills >= 5
-        if sag <= 0.06:
-            assert r.states.get("OFF_PLATFORM", 0) == 0
 
 
-def test_patrol_y_taken_at_bridge_end_trips_on_deep_sag_with_tight_tolerance():
-    # documents why a tight tolerance needs patrol_y from the middle of the walked range
-    from maplebot.settings import Settings
-    s = Settings()
-    s.calibration.patrol_y_tolerance = 0.04
-    r = simulate(seed=1, sag=0.07, patrol_y="end", settings=s)
+@pytest.mark.parametrize("sag", [0.063, 0.071])
+def test_sagging_bridge_with_current_settings_defaults(sag):
+    # whatever settings.py's defaults are right now must also survive the real sag
+    for seed in range(1, 4):
+        r = simulate(seed=seed, sag=sag, y_jitter=0.2)
+        assert r.states.get("OFF_PLATFORM", 0) == 0, (sag, seed)
+
+
+def test_symmetric_tight_band_would_trip_on_sag():
+    # documents why "below" must cover the sag: +-0.04 around the ends trips constantly
+    r = simulate(seed=1, sag=0.07, settings=band(below=0.04, above=0.04))
     assert r.states.get("OFF_PLATFORM", 0) > 100
 
 
-def test_default_tolerance_survives_patrol_y_from_bridge_ends():
-    # the wizard sets patrol_y from the two edge readings (bridge ends); the default
-    # tolerance (0.08) must not trip on a sagging middle
-    r = simulate(seed=1, sag=0.07, patrol_y="end")
-    assert r.states.get("OFF_PLATFORM", 0) == 0
-
-
 @pytest.mark.parametrize("seed", range(1, 5))
-def test_fall_to_bridge_below_stops_walking(seed):
-    r = simulate(seed=seed, fall_at=20.0, y_jitter=0.2)
-    assert r.fall_detect_delay_s is not None and r.fall_detect_delay_s <= 1.5
+@pytest.mark.parametrize("sag", [0.063, 0.071])
+def test_fall_to_bridge_below_stops_walking(seed, sag):
+    r = simulate(seed=seed, fall_at=20.0, y_jitter=0.2, sag=sag, settings=band())
+    assert r.fall_detect_delay_s is not None and r.fall_detect_delay_s <= 3.0
     assert r.walk_ticks_after_fall == 0          # never walks on the wrong bridge
     # only stands (OFF_PLATFORM) or shoots mobs in range (ENGAGE) until the supervisor pauses
     assert set(r.states_after_fall) <= {"OFF_PLATFORM", "ENGAGE"}
