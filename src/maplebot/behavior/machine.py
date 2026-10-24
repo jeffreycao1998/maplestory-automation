@@ -14,15 +14,28 @@ Controller:
     ATTACK           -> walking = None
     everything else  -> unchanged
 
+Facing starts UNKNOWN (None), also after reset(): the character may be facing either
+way when the bot starts or resumes, so the first engagement always sends FACE_* before
+the first ATTACK, and the first WALK_* also makes the facing known.
+
 Rules, in priority order (first match wins):
 
-    WAIT     confidence < 0.5 or LOW_CONFIDENCE flag     -> STOP_WALK if walking else IDLE
+    WAIT     confidence <= 0.5 or LOW_CONFIDENCE flag    -> STOP_WALK if walking else IDLE
     RECOVER  HP / MP below threshold, key set, pot cooldown passed -> USE_HP_POT / USE_MP_POT
+    WAIT     no minimap position                          -> STOP_WALK if walking else IDLE
     ENGAGE   mob in skill range on screen (or seen < 0.6 s ago)  -> STOP_WALK / FACE_* / ATTACK / IDLE
              (won't turn toward a mob behind while one ahead was seen < 0.3 s ago)
-    WAIT     no minimap position                          -> STOP_WALK if walking else IDLE
+    OFF_PLATFORM  patrol_y set and minimap y outside patrol_y +- tolerance for
+             OFF_PLATFORM_DEBOUNCE_S                      -> STOP_WALK if walking else IDLE
     PATROL   edges, approach visible mob, keep direction  -> WALK_* on change, else
     STUCK    still walking the same way, minimap x flat for stuck_s -> JUMP, else IDLE
+
+Confidence 0.5 is NOT trusted (inclusive threshold). The Perceiver scores a frame 0.5
+exactly when the minimap dot is missing, so this means the bot never engages or walks
+without a minimap position. An estimated player position (player_screen_estimated) is
+never used for ENGAGE or for walking toward mobs; patrolling by the minimap still works.
+Engaging a mob in range while OFF_PLATFORM is allowed; only walking is blocked (the
+supervisor pauses after safety.platform_lost_s).
 
 Approach hysteresis: after the patrol turns around at an edge, mobs beyond that edge
 are not approached until the opposite edge is reached or a mob comes into range
@@ -46,6 +59,7 @@ LINGER_S = 0.6              # stay in ENGAGE this long after the last in-range s
 STUCK_EPS = 0.004           # minimap x must move more than this to count as moving
 TARGET_SWITCH_MARGIN_PX = 40  # a mob behind us must be this much nearer to make us turn
 TURN_HOLD_S = 0.3           # don't turn away from a mob seen ahead within this long
+OFF_PLATFORM_DEBOUNCE_S = 0.2  # y out of band this long before we stop (1-px dot jitter)
 
 LEFT, RIGHT = "left", "right"
 
@@ -72,7 +86,7 @@ class Behavior:
     # ------------------------------------------------------------------ public API
     def reset(self) -> None:
         """Forget all beliefs and timers (called on resume after a pause)."""
-        self.facing: str = RIGHT
+        self.facing: Optional[str] = None      # unknown until we turn or walk
         self.walking: Optional[str] = None
         self._patrol_dir: str = RIGHT          # direction to resume patrolling in
         self._edge_block: Optional[str] = None  # don't approach mobs toward this edge
@@ -83,6 +97,7 @@ class Behavior:
         self._ahead: Optional[Tuple[Mob, float]] = None   # (mob, t) last in-range mob ahead
         self._approach_seen: float = -math.inf   # last time a mob was seen ahead while walking
         self._stuck_ref: Optional[Tuple[float, float]] = None   # (x, t) last movement
+        self._off_since: Optional[float] = None  # first tick y was off the training band
 
     def update_settings(self, settings: Settings) -> None:
         """Take new settings. Rebuilds the map model if the patrol bounds changed
@@ -97,15 +112,16 @@ class Behavior:
         self._track_movement(x, now)
         d = (self._rule_wait_confidence(p)
              or self._rule_recover(p, now)
-             or self._rule_engage(p, now)
              or self._rule_wait_minimap(x)
+             or self._rule_engage(p, now)
+             or self._rule_off_platform(p, now)
              or self._rule_patrol(p, x, now))  # type: ignore[arg-type]
         self._apply(d.action, x, now)
         return d
 
     # ------------------------------------------------------------------ rules
     def _rule_wait_confidence(self, p: Perception) -> Optional[Decision]:
-        if p.confidence < MIN_CONFIDENCE or Flag.LOW_CONFIDENCE in p.flags:
+        if p.confidence <= MIN_CONFIDENCE or Flag.LOW_CONFIDENCE in p.flags:
             return self._wait(f"low confidence ({p.confidence:.2f})")
         return None
 
@@ -136,12 +152,19 @@ class Behavior:
 
         self._last_in_range = now
         self._edge_block = None          # fresh start for patrol once this fight ends
-        dx = target.x - p.player_screen[0]    # type: ignore[index]
+        dx = target.x - self._player_xy(p)[0]    # type: ignore[index]
         where = f"mob {abs(dx)}px {_side(dx)}" if abs(dx) > DEAD_ZONE_PX else "mob on top of us"
         if self.walking:
             return Decision(Action.STOP_WALK, "ENGAGE", target, f"stop: {where}")
-        need = self.facing if abs(dx) <= DEAD_ZONE_PX else _side(dx)
+        if abs(dx) > DEAD_ZONE_PX:
+            need = _side(dx)
+        elif self.facing is not None:
+            need = self.facing                       # dead zone: keep facing
+        else:
+            need = RIGHT if dx >= 0 else LEFT        # dead zone, facing unknown: pick one
         if need != self.facing:
+            if self.facing is None:
+                where += ", facing unknown"
             self._ahead = (target, now)      # it will be ahead once we've turned
             return Decision(_FACE[need], "ENGAGE", target, f"turn {need}: {where}")
         if target not in p.mobs:
@@ -162,6 +185,23 @@ class Behavior:
         if x is None:
             return self._wait("no minimap position")
         return None
+
+    def _rule_off_platform(self, p: Perception, now: float) -> Optional[Decision]:
+        m = self.map
+        if m.patrol_y is None:
+            return None
+        x, y = p.player_map                         # type: ignore[misc]
+        if m.on_platform(x, y):
+            self._off_since = None
+            return None
+        if self._off_since is None:
+            self._off_since = now
+        if now - self._off_since < OFF_PLATFORM_DEBOUNCE_S:
+            return None                              # maybe dot jitter: keep going for now
+        why = f"not on the training bridge (y {y:.2f} vs {m.patrol_y:.2f})"
+        if self.walking:
+            return Decision(Action.STOP_WALK, "OFF_PLATFORM", reason=why)
+        return Decision(Action.IDLE, "OFF_PLATFORM", reason=why)
 
     def _rule_patrol(self, p: Perception, x: float, now: float) -> Decision:
         want, reason, target = self._patrol_choice(p, x, now)
@@ -187,10 +227,19 @@ class Behavior:
             return None
         return float(p.player_map[0])
 
+    @staticmethod
+    def _player_xy(p: Perception) -> Optional[Tuple[int, int]]:
+        """Player screen position usable for aiming/approaching: None if not found or
+        only estimated (an estimate is the screen centre, not where the character is)."""
+        if p.player_screen is None or p.player_screen_estimated:
+            return None
+        return p.player_screen
+
     def _same_row(self, p: Perception) -> List[Mob]:
-        if p.player_screen is None:
+        pos = self._player_xy(p)
+        if pos is None:
             return []
-        py = p.player_screen[1]
+        py = pos[1]
         tol = self.settings.skill.vertical_tolerance_px
         return [m for m in p.mobs if abs(m.y - py) <= tol]
 
@@ -199,9 +248,10 @@ class Behavior:
         face (or in the dead zone, or seen there < TURN_HOLD_S ago) is kept unless one
         behind us is TARGET_SWITCH_MARGIN_PX nearer, so two mobs at similar distances
         or a flickering detection don't make us flip back and forth."""
-        if p.player_screen is None:
+        pos = self._player_xy(p)
+        if pos is None:
             return None
-        px = p.player_screen[0]
+        px = pos[0]
         rng = self.settings.skill.range_px
         in_range = [m for m in self._same_row(p) if abs(m.x - px) <= rng]
         if not in_range:
@@ -239,7 +289,7 @@ class Behavior:
             return LEFT, "reached right edge", None
         mob = self._approach_target(p, now)
         if mob is not None:
-            dx = mob.x - p.player_screen[0]         # type: ignore[index]
+            dx = mob.x - self._player_xy(p)[0]      # type: ignore[index]
             toward = _side(dx)
             if dx != 0 and toward != self._edge_block:
                 return toward, f"approach mob {abs(dx)}px {toward}", mob
@@ -251,8 +301,9 @@ class Behavior:
         """Nearest visible same-row mob, with the same hysteresis as targeting: keep
         walking toward mobs ahead unless one behind is TARGET_SWITCH_MARGIN_PX nearer,
         and don't turn back while a mob ahead was seen < TURN_HOLD_S ago (flicker)."""
-        mobs = self._same_row(p)
-        px = p.player_screen[0] if p.player_screen is not None else 0
+        mobs = self._same_row(p)                    # empty if no usable player position
+        pos = self._player_xy(p)
+        px = pos[0] if pos is not None else 0
         key = lambda m: (abs(m.x - px), m.x)        # noqa: E731
         ahead = [m for m in mobs if self.walking and _side(m.x - px) == self.walking]
         if ahead:
