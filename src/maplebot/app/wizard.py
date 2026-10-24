@@ -122,6 +122,13 @@ class SetupWizard(tk.Toplevel):
         if self.key() == "summary":
             self.save()
             return
+        if self.key() == "patrol":
+            c = self.s.calibration
+            warn = logic.patrol_y_warning(self.ctx.patrol_left_y, self.ctx.patrol_right_y,
+                                          c.patrol_y_tolerance)
+            if warn and not messagebox.askyesno("Different bridges?", warn + "\n\nContinue anyway?",
+                                                parent=self):
+                return
         self.show_step(self.step + 1)
 
     def skip(self):
@@ -375,6 +382,8 @@ class SetupWizard(tk.Toplevel):
         def locate(lo, hi):
             return minimap_player_position(self.image, c.minimap_box, lo, hi)
 
+        # The sampler's own range is tried first and used whenever it finds the dot at the
+        # click; the stricter / default ranges are only a safety net.
         lo, hi, pos = logic.pick_dot_range(cands, locate, c.minimap_box, (x, y))
         if lo is not None:
             c.player_dot_hsv_low, c.player_dot_hsv_high = list(lo), list(hi)
@@ -536,8 +545,8 @@ class SetupWizard(tk.Toplevel):
         bar = ttk.Frame(f)
         bar.pack(fill="x", pady=(0, 6))
         ttk.Label(bar, text="Now drawing:").pack(side="left")
-        ttk.Radiobutton(bar, text="HP bar (red)", value="hp", variable=self.bar_target).pack(side="left", padx=4)
-        ttk.Radiobutton(bar, text="MP bar (blue)", value="mp", variable=self.bar_target).pack(side="left", padx=4)
+        ttk.Radiobutton(bar, text="HP bar (red, required)", value="hp", variable=self.bar_target).pack(side="left", padx=4)
+        ttk.Radiobutton(bar, text="MP bar (blue, recommended)", value="mp", variable=self.bar_target).pack(side="left", padx=4)
         ttk.Button(bar, text="Clear HP", command=lambda: self._clear_bar("hp")).pack(side="left", padx=(16, 2))
         ttk.Button(bar, text="Clear MP", command=lambda: self._clear_bar("mp")).pack(side="left", padx=2)
         self._retake_button(bar, self._redraw_bars).pack(side="left", padx=(16, 0))
@@ -560,7 +569,8 @@ class SetupWizard(tk.Toplevel):
             bar_fill = None
         for name, box in (("HP", c.hp_bar_box), ("MP", c.mp_bar_box)):
             if not box:
-                parts.append(f"{name}: not set")
+                parts.append("HP: not set yet (required)" if name == "HP"
+                             else "MP: not set (recommended -- magicians run out of MP fast)")
                 continue
             v = bar_fill(self.image, box) if bar_fill else None
             parts.append(f"{name} reads {logic.format_percent(v)} full" if v is not None
@@ -619,8 +629,9 @@ class SetupWizard(tk.Toplevel):
             Tooltip(w, "Position across the minimap: 0 = far left, 1 = far right. "
                        "You can nudge it here; move the ends inward a little if the bot walks off a ledge.")
         ttk.Label(f, foreground="#555555", wraplength=self.canvas_w, justify="left",
-                  text="Pick a flat stretch of one platform. Stop a few steps before ledges and "
-                       "walls. The pink lines below show the training area on the minimap.").pack(anchor="w", pady=6)
+                  text="Pick one bridge, set both edges on that same bridge, a little in from its "
+                       "ends (stop a few steps before ledges and walls). The pink lines below show "
+                       "the training area on the minimap.").pack(anchor="w", pady=6)
         self.canvas = ImageCanvas(f, self.canvas_w, max(160, self.canvas_h - 160))
         self.canvas.pack()
         self._redraw_patrol()
@@ -654,13 +665,20 @@ class SetupWizard(tk.Toplevel):
                 return
             x = round(float(pos[0]), 3)
             setattr(self.ctx, f"patrol_{side}_set", x)
+            setattr(self.ctx, f"patrol_{side}_y", round(float(pos[1]), 3))
             setattr(c, f"patrol_{side}", x)
+            previous_y = c.patrol_y
+            c.patrol_y = logic.combine_patrol_y(self.ctx.patrol_left_y, self.ctx.patrol_right_y, c.patrol_y)
             (self.left_var if side == "left" else self.right_var).set(_frac(x))
             self._redraw_patrol()
             l, r = self.ctx.patrol_left_set, self.ctx.patrol_right_set
             problem = logic.validate_patrol(l, r) if (l is not None and r is not None) else None
+            bridge = logic.patrol_y_warning(self.ctx.patrol_left_y, self.ctx.patrol_right_y,
+                                            c.patrol_y_tolerance, previous_y)
             if problem:
                 self.error(problem)
+            elif bridge:
+                self.error(bridge)
             elif side == "left" and r is None:
                 self.info(f"Left end set at {x:.2f}. Now walk to the RIGHT end and click Set right.")
             elif side == "right" and l is None:
@@ -677,8 +695,14 @@ class SetupWizard(tk.Toplevel):
         c = self.s.calibration
         x, y, w, h = c.minimap_box
         ovs = [("box", tuple(c.minimap_box), CYAN, "")]
+        if c.patrol_y is not None:
+            tol = c.patrol_y_tolerance
+            y0 = y + max(0.0, c.patrol_y - tol) * h
+            y1 = y + min(1.0, c.patrol_y + tol) * h
+        else:
+            y0, y1 = y, y + h
         for frac in (c.patrol_left, c.patrol_right):
-            ovs.append(("vline", x + frac * w, (y, y + h), MAGENTA))
+            ovs.append(("vline", x + frac * w, (y0, y1), MAGENTA))
         pos = None
         try:
             from maplebot.perception.calib import minimap_player_position

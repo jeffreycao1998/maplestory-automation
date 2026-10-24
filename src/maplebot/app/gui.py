@@ -366,7 +366,7 @@ class App:
                 self.msg_lbl.config(text=v)
             elif k in self.vals:
                 self.vals[k].config(text=v)
-        self.countdown_lbl.config(text=st.message if logic.is_countdown(st.message) and st.running else "")
+        self.countdown_lbl.config(text=logic.countdown_text(st))
         self._refresh_buttons()
 
     def _show_preview(self):
@@ -440,8 +440,31 @@ def _fatal(title: str, text: str) -> None:
     print(f"{title}: {text}", file=sys.stderr or sys.__stdout__)
 
 
+def write_pid_file(logs_dir: Path) -> Path:
+    """logs/app.pid lets start.bat check that *this* app started (not any pythonw.exe)."""
+    import atexit
+
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    path = logs_dir / "app.pid"
+    pid = str(os.getpid())
+    try:
+        path.write_text(pid, encoding="ascii")
+    except OSError:
+        return path
+
+    def remove():
+        try:
+            if path.read_text(encoding="ascii").strip() == pid:
+                path.unlink()
+        except OSError:
+            pass
+    atexit.register(remove)
+    return path
+
+
 def main() -> None:
     profile = Profile.default()
+    write_pid_file(profile.logs_dir)
     logfile = setup_logging(profile.logs_dir)
     log.info("MapleBot starting (python %s, %s)", sys.version.split()[0], sys.platform)
 

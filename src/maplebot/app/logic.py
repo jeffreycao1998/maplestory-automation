@@ -284,6 +284,8 @@ FIELD_INFO: Dict[Tuple[str, str], Tuple[str, str]] = {
     ("calibration", "mp_bar_box"): ("MP bar box (x, y, width, height)", "Where your MP bar is. Leave empty to not read MP. Set it with the setup wizard."),
     ("calibration", "patrol_left"): ("Patrol left edge (0-1)", "Left end of the training area, as a fraction of the minimap width (0 = far left, 1 = far right)."),
     ("calibration", "patrol_right"): ("Patrol right edge (0-1)", "Right end of the training area, as a fraction of the minimap width. Must be bigger than the left edge."),
+    ("calibration", "patrol_y"): ("Training platform height (0-1)", "Height of your training bridge/platform on the minimap (0 = top, 1 = bottom). Recorded automatically when you set the patrol edges in the wizard. Empty = not set."),
+    ("calibration", "patrol_y_tolerance"): ("Platform height tolerance (0-1)", "How far (as a fraction of the minimap height) your dot may be above/below the training platform before the bot thinks you fell off or are on another bridge. Raise it a little if the bridge sags a lot; lower it if bridges are close together."),
     ("calibration", "player_dot_hsv_low"): ("Your minimap dot colour, low (H, S, V)", "Darkest colour that still counts as your yellow dot. Set by clicking your dot in the wizard."),
     ("calibration", "player_dot_hsv_high"): ("Your minimap dot colour, high (H, S, V)", "Brightest colour that still counts as your yellow dot. Set by clicking your dot in the wizard."),
     ("detection", "mob_threshold"): ("Mob match strictness (0-1)", "How closely something must look like your mob pictures. Lower (e.g. 0.6) finds more mobs but may see things that aren't there; higher is stricter."),
@@ -329,6 +331,8 @@ FIELD_LIMITS: Dict[Tuple[str, str], Tuple[float, float]] = {
     ("skill", "vertical_tolerance_px"): (0, 1000),
     ("calibration", "patrol_left"): (0.0, 1.0),
     ("calibration", "patrol_right"): (0.0, 1.0),
+    ("calibration", "patrol_y"): (0.0, 1.0),
+    ("calibration", "patrol_y_tolerance"): (0.005, 0.5),
     ("detection", "mob_threshold"): (0.3, 0.99),
     ("detection", "player_threshold"): (0.3, 0.99),
     ("detection", "downscale"): (0.2, 1.0),
@@ -682,12 +686,14 @@ WIZARD_STEPS: List[WizardStep] = [
                "Optional: drag a box around your character's name tag under your character. "
                "This helps the bot know exactly where you are. Click Skip if you're not sure.",
                optional=True),
-    WizardStep("bars", "HP and MP bars (optional)",
-               "Optional: drag a box around your red HP bar, then your blue MP bar (just the "
-               "coloured bar). Needed for potions. Click Skip to leave it out.", optional=True),
+    WizardStep("bars", "HP and MP bars",
+               "Drag a box along your red HP bar (required: the bot stops before your character "
+               "dies), then your blue MP bar (recommended for magicians: it lets the bot drink MP "
+               "potions). Box just the coloured bar."),
     WizardStep("patrol", "Training area",
                "Walk your character to the LEFT end of where it should train, then click Set left. "
-               "Then walk to the RIGHT end and click Set right. The app hides for 3 seconds each time."),
+               "Then walk to the RIGHT end and click Set right. Pick one bridge, set both edges on "
+               "that same bridge, a little in from its ends. The app hides for 3 s each time."),
     WizardStep("keys", "Keys",
                "Click a button, then press that key. Set your attack skill and jump; potion keys "
                "are optional. Also tell the bot how far your skill reaches and how fast it casts."),
@@ -710,6 +716,8 @@ class WizardContext:
     patrol_left_set: Optional[float] = None
     patrol_right_set: Optional[float] = None
     patrol_preset: bool = False     # profile already had patrol edges -> may keep them
+    patrol_left_y: Optional[float] = None    # minimap y at the Set-left reading
+    patrol_right_y: Optional[float] = None
 
 
 def step_index(key: str) -> int:
@@ -772,6 +780,35 @@ def validate_patrol(left: Optional[float], right: Optional[float],
     return None
 
 
+def combine_patrol_y(left_y: Optional[float], right_y: Optional[float],
+                     existing: Optional[float] = None) -> Optional[float]:
+    """patrol_y = average minimap y of the Set-left / Set-right readings taken this time
+    (one reading alone is used as-is); no readings -> keep ``existing``."""
+    ys = [v for v in (left_y, right_y) if v is not None]
+    if not ys:
+        return existing
+    return round(sum(ys) / len(ys), 3)
+
+
+def patrol_y_warning(left_y: Optional[float], right_y: Optional[float], tolerance: float,
+                     existing: Optional[float] = None) -> Optional[str]:
+    """Warning if the two edge readings look like different bridges/platforms.
+
+    With only one reading this time, it is compared with the previously saved patrol_y.
+    """
+    if left_y is not None and right_y is not None:
+        a, b = left_y, right_y
+    else:
+        one = left_y if left_y is not None else right_y
+        if one is None or existing is None:
+            return None
+        a, b = one, existing
+    if abs(a - b) > tolerance:
+        return ("Those two spots look like different bridges (they're at different heights on "
+                "the minimap). Set both edges on the same bridge, a little in from its ends.")
+    return None
+
+
 def validate_keys(keys) -> Optional[str]:
     """Problems with the keys step (attack + jump required, all different)."""
     if not keys.attack:
@@ -815,6 +852,9 @@ def step_problem(key: str, ctx: WizardContext) -> Optional[str]:
     if key == "player":
         return None
     if key == "bars":
+        if not c.hp_bar_box:
+            return ("Drag a box along your red HP bar. It's required so the bot can stop "
+                    "before your character dies.")
         return (validate_bar_box(c.hp_bar_box, size, "HP bar")
                 or validate_bar_box(c.mp_bar_box, size, "MP bar"))
     if key == "patrol":
@@ -846,9 +886,10 @@ def summary_lines(ctx: WizardContext, player_template: bool) -> List[str]:
         f"Minimap: {box(c.minimap_box)}",
         f"Mob pictures: {ctx.n_mob_templates}",
         f"Name tag picture: {'yes' if player_template else 'no (optional)'}",
-        f"HP bar: {box(c.hp_bar_box) if c.hp_bar_box else 'not set (optional)'}",
-        f"MP bar: {box(c.mp_bar_box) if c.mp_bar_box else 'not set (optional)'}",
-        f"Training area: {c.patrol_left:.2f} to {c.patrol_right:.2f} across the minimap",
+        f"HP bar: {box(c.hp_bar_box) if c.hp_bar_box else 'NOT SET (required)'}",
+        f"MP bar: {box(c.mp_bar_box) if c.mp_bar_box else 'not set (recommended for magicians)'}",
+        f"Training area: {c.patrol_left:.2f} to {c.patrol_right:.2f} across the minimap"
+        + (f", platform height {c.patrol_y:.2f}" if c.patrol_y is not None else ""),
         f"Attack: {display_name(k.attack)}   Jump: {display_name(k.jump)}   "
         f"HP potion: {display_name(k.hp_potion)}   MP potion: {display_name(k.mp_potion)}",
         f"Skill reach: {s.skill.range_px} px   Time between casts: {s.skill.cooldown_s:.2f} s",
@@ -897,6 +938,23 @@ def is_countdown(message: str) -> bool:
     return (message or "").lower().startswith("starting in")
 
 
+def countdown_text(st) -> str:
+    """Big countdown label text ("" when not counting down).
+
+    Uses ``Status.countdown_s``; falls back to the old "Starting in..." message for a
+    runner that doesn't set it yet.
+    """
+    if not getattr(st, "running", False):
+        return ""
+    cd = getattr(st, "countdown_s", None)
+    if cd is not None:
+        if cd <= 0:
+            return ""
+        return f"Starting in {math.ceil(cd - 1e-9)}... click into the game"
+    msg = getattr(st, "message", "") or ""
+    return msg if is_countdown(msg) else ""
+
+
 def start_button_text(settings: Settings) -> str:
     return (f"Start   (pause {settings.safety.pause_hotkey.upper()}, "
             f"stop {settings.safety.stop_hotkey.upper()})")
@@ -916,11 +974,12 @@ def friendly_error(exc: BaseException) -> Tuple[str, str]:
             "\n\nOpen the game (windowed, not minimised) and check the window title in Settings."
     if name == "HotkeysUnavailable":
         return "Hotkeys unavailable", (text + "\n\nYou can still use the app's buttons.").strip()
-    if name in ("BackendError",) or isinstance(exc, PermissionError):
-        return "Can't press keys", (text or "Windows blocked the key presses.") + \
-            "\n\nClose the app and start it with start.bat (it asks for admin rights, which the game needs)."
     if isinstance(exc, FileNotFoundError):
         return "File missing", f"{text}\n\nTry running the setup wizard again.\n{_LOG_HINT}"
+    if name == "BackendError" or isinstance(exc, OSError):
+        detail = f"\n\n(Windows said: {text})" if text and len(text) < 200 else ""
+        return "Can't press keys", ("Can't press keys in the game -- start the bot with start.bat "
+                                    "so it runs as administrator." + detail)
     if isinstance(exc, MemoryError):
         return "Out of memory", f"Your PC ran out of memory. Close other programs and try again.\n{_LOG_HINT}"
     detail = f" ({text})" if text and len(text) < 200 else ""
