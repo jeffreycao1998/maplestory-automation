@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from maplebot.behavior import DEAD_ZONE_PX, LINGER_S, Behavior
+from maplebot.behavior import DEAD_ZONE_PX, LINGER_S, TURN_HOLD_S, Behavior
 from maplebot.mapmodel import MapModel
 from maplebot.types import Action, Flag
 
@@ -205,6 +205,33 @@ def test_nearest_behind_wins_only_by_margin():
     b = make_behavior()
     d = b.decide(perc(mobs=[X + 200, X - 100]), 0.0)
     assert d.action is A.FACE_LEFT and d.target.x == X - 100   # 100 px closer: turn
+
+
+def test_flicker_of_mob_ahead_does_not_turn_us():
+    b = make_behavior()                                  # facing right
+    assert b.decide(perc(mobs=[X + 100, X - 150]), 0.0).action is A.ATTACK
+    d = b.decide(perc(mobs=[X - 150]), 0.07)              # right mob missed one frame
+    assert d.action is A.IDLE and b.facing == "right"
+    assert "last seen" in d.reason
+    d = b.decide(perc(mobs=[X - 150]), 0.07 + TURN_HOLD_S)   # gone for good -> turn
+    assert d.action is A.FACE_LEFT
+
+
+def test_turned_to_target_is_held_through_flicker():
+    b = make_behavior()
+    assert b.decide(perc(mobs=[X - 100]), 0.0).action is A.FACE_LEFT
+    d = b.decide(perc(mobs=[X + 150]), 0.07)              # left mob missed, right one seen
+    assert d.action is A.ATTACK and b.facing == "left"
+
+
+def test_approach_flicker_keeps_walking():
+    b = make_behavior()
+    walk_right(b)
+    b.decide(perc(mobs=[X + 500]), 0.07)                  # approaching right
+    d = b.decide(perc(mobs=[X - 450]), 0.14)              # right mob flickers out
+    assert d.action is A.IDLE and b.walking == "right"
+    d = b.decide(perc(mobs=[X - 450]), 0.14 + TURN_HOLD_S)
+    assert d.action is A.WALK_LEFT
 
 
 @pytest.mark.parametrize("dx", [DEAD_ZONE_PX, -DEAD_ZONE_PX, 0, 5, -5])

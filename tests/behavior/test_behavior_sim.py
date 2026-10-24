@@ -21,11 +21,13 @@ def test_sixty_second_run(seed):
     assert r.min_map_x < 0.32 and r.max_map_x > 0.68
 
 
-def test_crowded_fast_mobs_no_oscillation():
-    r = simulate(seed=3, n_mobs=10, mob_speed=60.0, miss_rate=0.25)
+@pytest.mark.parametrize("seed", range(1, 6))
+def test_crowded_fast_flickering_mobs_no_oscillation(seed):
+    # 10 mobs moving 60 px/s, 25% of detections missed per frame
+    r = simulate(seed=seed, n_mobs=10, mob_speed=60.0, miss_rate=0.25)
     assert r.kills >= 10
     assert r.max_overshoot <= OVERSHOOT_MAX
-    assert r.max_facing_changes_per_s <= 4, r.facing_changes
+    assert r.max_facing_changes_per_s <= 3, r.facing_changes
 
 
 def test_obstacle_triggers_stuck_jump_and_patrol_continues():
@@ -36,8 +38,9 @@ def test_obstacle_triggers_stuck_jump_and_patrol_continues():
     assert r.kills >= 5
 
 
-def test_narrow_patrol_zone_stays_inside():
+@pytest.mark.parametrize("seed", range(1, 5))
+def test_narrow_patrol_zone_stays_inside(seed):
     s = make_settings(calibration__patrol_left=0.45, calibration__patrol_right=0.55)
-    r = simulate(seed=2, settings=s)
+    r = simulate(seed=seed, settings=s, n_mobs=8)
     assert r.max_overshoot <= OVERSHOOT_MAX
     assert r.kills >= 3

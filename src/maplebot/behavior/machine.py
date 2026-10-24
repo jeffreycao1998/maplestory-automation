@@ -27,6 +27,8 @@ Rules, in priority order (first match wins):
 Approach hysteresis: after the patrol turns around at an edge, mobs beyond that edge
 are not approached until the opposite edge is reached or a mob comes into range
 (otherwise a mob just past the edge would make the patrol bounce at the edge).
+Flicker hysteresis: a mob seen ahead (targeting or approaching) within TURN_HOLD_S
+keeps us facing / walking that way even if this frame missed it.
 """
 from __future__ import annotations
 
@@ -49,7 +51,6 @@ LEFT, RIGHT = "left", "right"
 
 _WALK = {LEFT: Action.WALK_LEFT, RIGHT: Action.WALK_RIGHT}
 _FACE = {LEFT: Action.FACE_LEFT, RIGHT: Action.FACE_RIGHT}
-_OPPOSITE = {LEFT: RIGHT, RIGHT: LEFT}
 
 
 def _pct(v: float) -> str:
@@ -80,6 +81,7 @@ class Behavior:
         self._last_mp_pot: float = -math.inf
         self._last_in_range: float = -math.inf
         self._ahead: Optional[Tuple[Mob, float]] = None   # (mob, t) last in-range mob ahead
+        self._approach_seen: float = -math.inf   # last time a mob was seen ahead while walking
         self._stuck_ref: Optional[Tuple[float, float]] = None   # (x, t) last movement
 
     def update_settings(self, settings: Settings) -> None:
@@ -140,6 +142,7 @@ class Behavior:
             return Decision(Action.STOP_WALK, "ENGAGE", target, f"stop: {where}")
         need = self.facing if abs(dx) <= DEAD_ZONE_PX else _side(dx)
         if need != self.facing:
+            self._ahead = (target, now)      # it will be ahead once we've turned
             return Decision(_FACE[need], "ENGAGE", target, f"turn {need}: {where}")
         if target not in p.mobs:
             where += " (last seen)"
@@ -161,7 +164,7 @@ class Behavior:
         return None
 
     def _rule_patrol(self, p: Perception, x: float, now: float) -> Decision:
-        want, reason, target = self._patrol_choice(p, x)
+        want, reason, target = self._patrol_choice(p, x, now)
         if self.walking != want:
             return Decision(_WALK[want], "PATROL", target, reason)
         # Still walking the same way: STUCK check (a turn-around above takes priority,
@@ -207,21 +210,26 @@ class Behavior:
         nearest = min(in_range, key=key)
         ahead = [m for m in in_range
                  if abs(m.x - px) <= DEAD_ZONE_PX or _side(m.x - px) == self.facing]
+        # The nearest mob ahead may just have flickered out of detection: keep it as a
+        # candidate for TURN_HOLD_S so one missed frame doesn't spin us around.
+        held = self._held_ahead(now)
         if ahead:
             best_ahead = min(ahead, key=key)
-            self._ahead = (best_ahead, now)
+            if (held is not None and abs(held.x - px)
+                    < abs(best_ahead.x - px) - TARGET_SWITCH_MARGIN_PX):
+                best_ahead = held          # a clearly nearer one ahead just flickered out
+            else:
+                self._ahead = (best_ahead, now)
+        elif held is not None:
+            best_ahead = held
         else:
-            # The mob ahead may just have flickered out of detection: keep it as the
-            # candidate for TURN_HOLD_S so one missed frame doesn't spin us around.
-            best_ahead = self._held_ahead(now)
-            if best_ahead is None:
-                return nearest
+            return nearest
         if abs(nearest.x - px) < abs(best_ahead.x - px) - TARGET_SWITCH_MARGIN_PX:
             self._ahead = None           # deliberate switch: no hold
             return nearest
         return best_ahead
 
-    def _patrol_choice(self, p: Perception, x: float) -> Tuple[str, str, Optional[Mob]]:
+    def _patrol_choice(self, p: Perception, x: float, now: float) -> Tuple[str, str, Optional[Mob]]:
         """(direction to walk, reason, mob being approached or None)."""
         if x <= self.map.patrol_left:
             self._edge_block = LEFT
@@ -229,7 +237,7 @@ class Behavior:
         if x >= self.map.patrol_right:
             self._edge_block = RIGHT
             return LEFT, "reached right edge", None
-        mob = self._approach_target(p)
+        mob = self._approach_target(p, now)
         if mob is not None:
             dx = mob.x - p.player_screen[0]         # type: ignore[index]
             toward = _side(dx)
@@ -239,21 +247,28 @@ class Behavior:
             return self.walking, "patrolling", None
         return self._patrol_dir, f"start patrol {self._patrol_dir}", None
 
-    def _approach_target(self, p: Perception) -> Optional[Mob]:
-        """Nearest visible same-row mob, preferring the walking direction unless one
-        behind is TARGET_SWITCH_MARGIN_PX nearer (stops flip-flopping between two mobs)."""
+    def _approach_target(self, p: Perception, now: float) -> Optional[Mob]:
+        """Nearest visible same-row mob, with the same hysteresis as targeting: keep
+        walking toward mobs ahead unless one behind is TARGET_SWITCH_MARGIN_PX nearer,
+        and don't turn back while a mob ahead was seen < TURN_HOLD_S ago (flicker)."""
         mobs = self._same_row(p)
+        px = p.player_screen[0] if p.player_screen is not None else 0
+        key = lambda m: (abs(m.x - px), m.x)        # noqa: E731
+        ahead = [m for m in mobs if self.walking and _side(m.x - px) == self.walking]
+        if ahead:
+            best_ahead = min(ahead, key=key)
+            self._approach_seen = now
+        else:
+            best_ahead = None
         if not mobs:
             return None
-        px = p.player_screen[0]                     # type: ignore[index]
-        key = lambda m: (abs(m.x - px), m.x)        # noqa: E731
         nearest = min(mobs, key=key)
         if not self.walking:
             return nearest
-        ahead = [m for m in mobs if _side(m.x - px) == self.walking]
-        if not ahead:
+        if best_ahead is None:
+            if now - self._approach_seen < TURN_HOLD_S:
+                return None                  # keep walking: the mob ahead flickered out
             return nearest
-        best_ahead = min(ahead, key=key)
         if abs(nearest.x - px) < abs(best_ahead.x - px) - TARGET_SWITCH_MARGIN_PX:
             return nearest
         return best_ahead
@@ -278,7 +293,6 @@ class Behavior:
             self.walking = None
             self._stuck_ref = None
         elif action in (Action.FACE_LEFT, Action.FACE_RIGHT):
-            self._ahead = None
             self.walking = None
             self._stuck_ref = None
             self.facing = LEFT if action is Action.FACE_LEFT else RIGHT

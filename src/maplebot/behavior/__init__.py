@@ -5,6 +5,9 @@ from maplebot.behavior.machine import (
     LINGER_S,
     MIN_CONFIDENCE,
     STUCK_EPS,
+    TARGET_SWITCH_MARGIN_PX,
+    TURN_HOLD_S,
 )
 
-__all__ = ["Behavior", "DEAD_ZONE_PX", "LINGER_S", "MIN_CONFIDENCE", "STUCK_EPS"]
+__all__ = ["Behavior", "DEAD_ZONE_PX", "LINGER_S", "MIN_CONFIDENCE", "STUCK_EPS",
+           "TARGET_SWITCH_MARGIN_PX", "TURN_HOLD_S"]
