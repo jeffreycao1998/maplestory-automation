@@ -15,8 +15,10 @@ Pipeline per frame (all OpenCV, no models):
      texture (also ~0.6). Light blur forgives the small shape change and colour rejects
      green-on-green leaves: on the real Tree That Grew II frame this moves the worst true
      mob to 0.74 and the best background patch to 0.63.
+     c. Partly hidden: a whole-template score just under the threshold gets a second try
+        with each half of the template alone (HALF_BAND / HALF_PENALTY).
      Then greedy non-max suppression across all templates, and anything centred inside
-     the minimap / HP / MP boxes is dropped.
+     the minimap / HP / MP boxes is dropped (UI proposals are skipped before verifying).
   3. Player: name-tag template, coarse-to-fine; body centre is placed
      detection.player_tag_offset_px above the tag centre. Otherwise a fixed screen estimate.
   4. HP/MP: calib.bar_fill on the calibrated bar boxes.
@@ -66,6 +68,12 @@ VERIFY_BLUR_KSIZE = 7        # fixed kernel (~2.3 sigma each side): much faster 
 # Best proposals per template variant that get verified. On the real frame true mobs rank
 # 0-2 among proposals; 10 leaves room for a crowded screen and bounds the cost (~0.3 ms each).
 MAX_VERIFY_PER_TEMPLATE = 10
+# Partly hidden mobs (another mob or the player in front of one side): if the whole-template
+# score lands within HALF_BAND below mob_threshold, the left and right halves are scored
+# alone. A half needs mob_threshold + HALF_PENALTY, and is reported as (half score -
+# HALF_PENALTY), because half a sprite is weaker evidence than a whole one.
+HALF_BAND = 0.15
+HALF_PENALTY = 0.10
 
 MIN_TEMPLATE_PX = 6         # a template smaller than this after downscaling is skipped
 MAX_CANDIDATES_PER_TEMPLATE = 200   # bound NMS work on noisy frames
@@ -331,7 +339,8 @@ class Perceiver:
         bpad = VERIFY_BLUR_KSIZE // 2                  # so the ROI blur has real context
         coarse_th = threshold - COARSE_MARGIN
 
-        cands = []   # (score, x0, y0, x1, y1, name, w, h) full-res box
+        # Stage a: proposals from every template variant.
+        proposals = []   # (coarse score, gx, gy, template)
         for tp in self._prepared:
             th, tw = tp.small.shape[:2]
             if th > sh or tw > sw or tp.h > H_ or tp.w > W_:
@@ -353,42 +362,24 @@ class Perceiver:
                 gx, gy = int(round(x * fx)), int(round(y * fy))     # full-res top-left guess
                 if any(_centre_in(gx + tp.w / 2.0, gy + tp.h / 2.0, b) for b in exclude):
                     continue   # UI (minimap / bars): don't spend a verification on it
-                x0 = max(0, gx - pad - bpad)
-                y0 = max(0, gy - pad - bpad)
-                x1 = min(W_, gx + tp.w + pad + bpad)
-                y1 = min(H_, gy + tp.h + pad + bpad)
-                if x1 - x0 < tp.w or y1 - y0 < tp.h:
-                    continue
-                roi = _blur(img[y0:y1, x0:x1])
-                # Only accept positions within `pad` of the proposal (not in the blur margin).
-                ix0, iy0 = max(0, gx - pad - x0), max(0, gy - pad - y0)
-                ix1 = min(x1 - x0 - tp.w, gx + pad - x0)
-                iy1 = min(y1 - y0 - tp.h, gy + pad - y0)
-                if ix1 < ix0 or iy1 < iy0:
-                    continue
-                rr = cv2.matchTemplate(roi[iy0:iy1 + tp.h, ix0:ix1 + tp.w], tp.verify,
-                                       cv2.TM_CCOEFF_NORMED)
-                np.nan_to_num(rr, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-                _, s, _, (bx, by) = cv2.minMaxLoc(rr)
-                if s < threshold:
-                    continue
-                cx = x0 + ix0 + bx + tp.w / 2.0
-                cy = y0 + iy0 + by + tp.h / 2.0
-                cands.append((s, cx - tp.w / 2.0, cy - tp.h / 2.0, cx + tp.w / 2.0,
-                              cy + tp.h / 2.0, tp.name, tp.w, tp.h))
+                proposals.append((float(res[y, x]), gx, gy, tp))
 
-        cands.sort(key=lambda c: c[0], reverse=True)
-        kept = []
-        for c in cands:
+        # Stages b + c, best proposal first. A proposal centred inside an already accepted
+        # mob would be removed by NMS anyway (same mob via its mirror or another template),
+        # so it is not verified at all; that is where most of the verification time went.
+        proposals.sort(key=lambda q: q[0], reverse=True)
+        kept = []    # (score, x0, y0, x1, y1, name, w, h) full-res box
+        for _, gx, gy, tp in proposals:
+            pcx, pcy = gx + tp.w / 2.0, gy + tp.h / 2.0
+            if any(k_[1] <= pcx < k_[3] and k_[2] <= pcy < k_[4] for k_ in kept):
+                continue
+            c = self._verify(img, tp, gx, gy, pad, bpad, threshold)
+            if c is None:
+                continue
             box = c[1:5]
             cx, cy = (box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0
-            dup = False
-            for k_ in kept:
-                kb = k_[1:5]
-                if _iou(box, kb) > NMS_IOU or (kb[0] <= cx < kb[2] and kb[1] <= cy < kb[3]):
-                    dup = True
-                    break
-            if dup:
+            if any(_iou(box, k_[1:5]) > NMS_IOU or (k_[1] <= cx < k_[3] and k_[2] <= cy < k_[4])
+                   for k_ in kept):
                 continue
             if any(_centre_in(cx, cy, b) for b in exclude):
                 continue
@@ -399,6 +390,59 @@ class Perceiver:
         return [Mob(x=int(round((c[1] + c[3]) / 2.0)), y=int(round((c[2] + c[4]) / 2.0)),
                     w=int(c[6]), h=int(c[7]), score=float(min(1.0, max(0.0, c[0]))), template=c[5])
                 for c in kept]
+
+    def _verify(self, img: np.ndarray, tp: "_Prepared", gx: int, gy: int, pad: int, bpad: int,
+                threshold: float):
+        """Colour check of one proposal (top-left guess gx, gy at full resolution).
+
+        Returns (score, x0, y0, x1, y1, name, w, h) or None if below `threshold`.
+        """
+        H_, W_ = img.shape[:2]
+        x0 = max(0, gx - pad - bpad)
+        y0 = max(0, gy - pad - bpad)
+        x1 = min(W_, gx + tp.w + pad + bpad)
+        y1 = min(H_, gy + tp.h + pad + bpad)
+        if x1 - x0 < tp.w or y1 - y0 < tp.h:
+            return None
+        roi = _blur(img[y0:y1, x0:x1])
+        # Only accept positions within `pad` of the proposal (not in the blur margin).
+        ix0, iy0 = max(0, gx - pad - x0), max(0, gy - pad - y0)
+        ix1 = min(x1 - x0 - tp.w, gx + pad - x0)
+        iy1 = min(y1 - y0 - tp.h, gy + pad - y0)
+        if ix1 < ix0 or iy1 < iy0:
+            return None
+        sub = roi[iy0:iy1 + tp.h, ix0:ix1 + tp.w]
+        rr = cv2.matchTemplate(sub, tp.verify, cv2.TM_CCOEFF_NORMED)
+        np.nan_to_num(rr, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+        _, s, _, (bx, by) = cv2.minMaxLoc(rr)
+        if threshold - HALF_BAND <= s < threshold:
+            s, bx, by = self._half_match(sub, tp, threshold, s, bx, by)
+        if s < threshold:
+            return None
+        cx = x0 + ix0 + bx + tp.w / 2.0
+        cy = y0 + iy0 + by + tp.h / 2.0
+        return (s, cx - tp.w / 2.0, cy - tp.h / 2.0, cx + tp.w / 2.0, cy + tp.h / 2.0,
+                tp.name, tp.w, tp.h)
+
+    @staticmethod
+    def _half_match(sub: np.ndarray, tp: "_Prepared", threshold: float, s: float, bx: int, by: int):
+        """Best of the whole-template result and the left/right half templates (see HALF_BAND).
+
+        `sub` is the blurred search window for the whole template; a half is searched over
+        the same top-left positions, so (bx, by) stays the whole sprite's top-left.
+        """
+        hw = tp.w // 2
+        nx = sub.shape[1] - tp.w + 1          # whole-template positions in x
+        for hx, half in ((0, tp.verify[:, :hw]), (tp.w - hw, tp.verify[:, tp.w - hw:])):
+            win = sub[:, hx:hx + nx - 1 + half.shape[1]]
+            if win.shape[1] < half.shape[1] or win.shape[0] < half.shape[0]:
+                continue
+            hr = cv2.matchTemplate(win, half, cv2.TM_CCOEFF_NORMED)
+            np.nan_to_num(hr, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+            _, hs, _, (hbx, hby) = cv2.minMaxLoc(hr)
+            if hs >= threshold + HALF_PENALTY and hs - HALF_PENALTY > s:
+                s, bx, by = hs - HALF_PENALTY, hbx, hby
+        return s, bx, by
 
     # ---- player -----------------------------------------------------------------------
     def _find_player(self, gray: np.ndarray, small: Optional[np.ndarray] = None) -> Optional[PointPx]:
