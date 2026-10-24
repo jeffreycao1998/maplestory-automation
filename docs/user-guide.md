@@ -62,7 +62,7 @@ it's in front and nothing covers it.
 | 3. Minimap | **Drag a box** around the minimap. A cyan box shows what you picked. | Include the whole map area but not its title bar. Drag again to redo it. |
 | 4. Your dot | The minimap is shown zoomed in. **Click your own yellow dot.** A green circle shows where the bot sees you. | Don't click party members' orange dots. If the circle isn't on your dot, click **Try again**. |
 | 5. Mobs | **Drag a tight box** around a monster. Each box is saved straight away and appears as a thumbnail. Draw another box to add another. | Keep the box **tight**, with as little background as possible. Add **2 or 3 pictures** of each monster in different poses (walking, turning, getting hit). Use **Retake screenshot** to catch other poses, and **Delete** to remove a bad picture. |
-| 6. Name tag (optional) | Drag a box around **your character's name tag**. | Helps the bot know exactly where you stand. Click **Skip** if you're unsure. |
+| 6. Your name tag | Drag a tight box around the **name tag under YOUR character**. The bot uses it to know exactly where you are. **This step is required**: without it, the bot only guesses your position and won't attack. | Box just your name, not other players' tags or your guild name. If you change characters, redo this step. |
 | 7. HP and MP bars | Pick **HP bar** and drag along the red bar. **This one is required**: the bot uses it to stop before your character dies. Then do the same for the blue **MP bar**. The wizard shows how full it reads each bar, e.g. "HP reads 43% full". | The MP bar is optional but **strongly recommended for magicians**: you run out of MP fast, and without it the bot can't drink MP potions. Check the numbers roughly match the game. |
 | 8. Training area | Walk your character to the **left end** of where it should train. Click **Set left** and click the game during the countdown. Then walk to the **right end** and click **Set right**. The wizard also records how high that bridge is on the minimap. | **Pick one bridge, set both edges on that same bridge, a little in from its ends.** On maps like The Tree That Grew II, with a stack of sagging rope bridges, the wizard warns "those two spots look like different bridges" if your two readings are at different heights. You can fine-tune both numbers in the boxes (0 = far left of the minimap, 1 = far right). |
 | 9. Keys | Click **Press a key**, then press your **attack skill** key. Do the same for **jump**, and optionally your **HP** and **MP potion** keys. You can also choose from the dropdown. Then set the skill's **reach** with the slider and the **time between casts**. | Magic Claw is about **0.6–0.7 s** between casts. Start with a slightly short reach and check it in the live preview. Each key must be different. |
@@ -84,6 +84,11 @@ The main window stays on top of the game (untick **Keep on top** if you don't wa
 | Closing the window | Also stops the bot. |
 
 F11 and F12 work even while the game is in front. You can change them in Settings.
+If they can't be used on your PC, a red **"F11/F12 not working — use the buttons"** badge
+stays in the main window. Use the Pause and Stop buttons instead.
+
+Only one copy of MapleBot can be open at a time. If you double-click `start.bat` while
+it's already open, it tells you so instead of opening a second copy.
 
 The **Status** box shows what the bot is doing: its state (PATROL = walking around,
 ENGAGE = attacking, RECOVER / STUCK = sorting itself out, WAIT = can't see enough),
@@ -96,7 +101,7 @@ Tick **Preview** to see what the bot sees:
 
 | Colour | Means |
 |---|---|
-| **Green** circle and box | You, and how far your skill reaches. **Amber** means the bot is guessing your position (no name tag picture). |
+| **Green** circle and box | You, and how far your skill reaches. **Amber** means the bot can't find your name tag right now and is guessing. It won't attack until it finds you again. |
 | **Orange** boxes | Monsters it found |
 | **Red** box | The monster it's attacking now |
 | **Cyan** box | The minimap |
@@ -124,8 +129,9 @@ Check the game, fix the problem, then press **F11** or **Resume**.
 | **"Game window not found"** | The game must be open, windowed and not minimised. Check the window title in Settings → Screen setup. |
 | The **wizard screenshot is black or blank** | Don't minimise the game. Click on it during the countdown so nothing covers it. |
 | **Potions aren't used** | Set the HP/MP bar boxes (wizard step 7) and the potion keys (step 9). |
-| **"Those two spots look like different bridges"** | You set the left and right edges on different bridges. Redo step 8, standing on the same bridge both times. If it's one bridge that sags a lot in the middle, raise **Platform height tolerance** a little in Settings → Screen setup. |
-| It thinks it **fell off the platform** while it's still on the bridge | Raise **Platform height tolerance** a little (Settings → Screen setup). |
+| **"Those two spots look like different bridges"** | You set the left and right edges on different bridges. Redo step 8, standing on the same bridge both times. Both ends of one bridge are at the same height, so this check is strict (**Platform tolerance above** in Settings → Screen setup). |
+| It thinks it **fell off the platform** while it's still on the bridge | Raise **Platform tolerance below** a little (Settings → Screen setup). Bridges sag in the middle. |
+| It **patrols but never attacks** | It can't find your name tag. Redo wizard step 6 with a tight box around just your name. In the preview, your circle should be **green**, not amber. |
 | The app **doesn't open** at all | Run `start.bat` again. It shows the error in a black window if the app can't start. If installing failed, delete the `.venv` folder and run `start.bat` again. |
 
 **Logs:** click **Open logs folder** in the main window. `app.log` has the app's messages,

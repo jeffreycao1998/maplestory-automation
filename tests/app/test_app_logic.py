@@ -352,7 +352,7 @@ def test_wizard_steps_shape():
     keys = [s.key for s in L.WIZARD_STEPS]
     assert keys == ["window", "screenshot", "minimap", "dot", "mobs", "player", "bars",
                     "patrol", "keys", "summary"]
-    assert {s.key for s in L.WIZARD_STEPS if s.optional} == {"player"}   # HP bar is required
+    assert not [s.key for s in L.WIZARD_STEPS if s.optional]   # name tag + HP bar required
     for s in L.WIZARD_STEPS:
         assert 10 < len(s.instruction) < 320
     assert L.step_label(0) == "Step 1 of 10: Game window"
@@ -388,7 +388,8 @@ def test_step_dot_and_mobs():
     assert L.step_problem("dot", ctx(dot_pos=(0.4, 0.5))) is None
     assert L.step_problem("mobs", ctx())
     assert L.step_problem("mobs", ctx(n_mob_templates=2)) is None
-    assert L.step_problem("player", ctx()) is None
+    assert "required" in L.step_problem("player", ctx())
+    assert L.step_problem("player", ctx(has_player_template=True)) is None
 
 
 def test_step_bars():
@@ -442,7 +443,7 @@ def test_validate_keys():
 
 
 def test_step_summary():
-    c = ctx(n_mob_templates=1)
+    c = ctx(n_mob_templates=1, has_player_template=True)
     assert "Minimap" in L.step_problem("summary", c)
     c.settings.calibration.minimap_box = [8, 30, 160, 120]
     assert "HP bar" in L.step_problem("summary", c)
@@ -450,6 +451,8 @@ def test_step_summary():
     assert L.step_problem("summary", c) is None
     c.n_mob_templates = 0
     assert "mob pictures" in L.step_problem("summary", c)
+    c.n_mob_templates, c.has_player_template = 1, False
+    assert "name tag" in L.step_problem("summary", c)
 
 
 def test_summary_lines():
@@ -610,8 +613,11 @@ def test_patrol_instruction_mentions_one_bridge():
 def test_summary_mentions_hp_required_and_patrol_y():
     c = ctx()
     c.settings.calibration.patrol_y = 0.446
-    text = "\n".join(L.summary_lines(c, player_template=False))
+    text = "\n".join(L.summary_lines(c))
     assert "required" in text and "recommended for magicians" in text and "0.45" in text
+    assert "Name tag picture: NOT SET (required)" in text
+    c.has_player_template = True
+    assert "Name tag picture: yes" in "\n".join(L.summary_lines(c))
 
 
 def test_countdown_text_uses_countdown_s():
@@ -654,3 +660,100 @@ def test_start_bat_robust_quoting():
     # no parenthesised blocks that a ')' in the folder path could break
     import re
     assert not re.search(r"^\s*if [^\r\n]*\($", text, re.M)
+
+
+# ---------------------------------------------------------------- re-review round 2
+
+def test_name_tag_step_text():
+    st = L.WIZARD_STEPS[L.step_index("player")]
+    assert not st.optional and "YOUR character" in st.instruction
+    assert "exactly where you are" in st.instruction
+
+
+def test_tolerance_above_field_and_band():
+    from maplebot.settings import Calibration
+    c = Calibration()
+    assert L.tolerance_above(c) == pytest.approx(getattr(c, "patrol_y_tolerance_above", 0.03))
+    assert L.patrol_band(c) is None
+    c.patrol_y, c.patrol_y_tolerance = 0.45, 0.10
+    c.patrol_y_tolerance_above = 0.03
+    assert L.patrol_band(c) == pytest.approx((0.42, 0.55))      # asymmetric: small above, big below
+    c.patrol_y = 0.98
+    assert L.patrol_band(c)[1] == 1.0
+    assert ("calibration", "patrol_y_tolerance_above") in L.FIELD_INFO
+    assert ("calibration", "patrol_y_tolerance_above") in L.FIELD_LIMITS
+
+
+def test_tolerance_above_in_form_when_settings_has_it():
+    import dataclasses
+    from maplebot.settings import Calibration
+    names = {f.name for f in dataclasses.fields(Calibration)}
+    if "patrol_y_tolerance_above" not in names:
+        pytest.skip("settings.py doesn't have patrol_y_tolerance_above yet")
+    sp = next(x for x in L.iter_fields() if x.key == ("calibration", "patrol_y_tolerance_above"))
+    assert "ABOVE" in sp.tooltip and sp.kind == "float"
+
+
+def test_different_bridges_uses_tolerance_above():
+    from maplebot.settings import Calibration
+    c = Calibration()
+    c.patrol_y_tolerance = 0.10
+    c.patrol_y_tolerance_above = 0.03
+    tol = L.tolerance_above(c)
+    # 0.05 apart: inside the generous "below" tolerance, but two ends of one bridge
+    # should match closely, so it's flagged.
+    assert L.patrol_y_warning(0.40, 0.45, tol)
+    assert L.patrol_y_warning(0.40, 0.42, tol) is None
+
+
+def test_hotkey_badge():
+    s = Settings()
+    assert L.hotkey_badge(SimpleNamespace(running=True, hotkeys_ok=False), s) == \
+        "F11/F12 not working -- use the buttons"
+    assert L.hotkey_badge(SimpleNamespace(running=True, hotkeys_ok=True), s) == ""
+    assert L.hotkey_badge(SimpleNamespace(running=False, hotkeys_ok=False), s) == ""
+    assert L.hotkey_badge(Status(running=True), s) == ""          # default hotkeys_ok
+
+
+def _run_py(code, *args):
+    import os
+    root = __import__("pathlib").Path(__file__).resolve().parents[2] / "src"
+    return subprocess.Popen([sys.executable, "-c", code, *args], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, stdin=subprocess.PIPE, text=True,
+                            env={**os.environ, "PYTHONPATH": str(root)})
+
+
+def test_single_instance_lock(tmp_path):
+    holder = _run_py("import sys, pathlib; sys.modules['tkinter'] = None\n"
+                     "from maplebot.app.gui import acquire_single_instance\n"
+                     "f = acquire_single_instance(pathlib.Path(sys.argv[1]))\n"
+                     "print('locked', flush=True); sys.stdin.readline()\n", str(tmp_path))
+    try:
+        assert holder.stdout.readline().strip() == "locked"
+        second = _run_py("import sys, pathlib; sys.modules['tkinter'] = None\n"
+                         "from maplebot.app.gui import acquire_single_instance, AlreadyRunning\n"
+                         "try:\n    acquire_single_instance(pathlib.Path(sys.argv[1]))\n"
+                         "except AlreadyRunning as e:\n    print('blocked:', e)\n", str(tmp_path))
+        out, err = second.communicate(timeout=30)
+        assert "blocked: The bot is already open." in out, err
+    finally:
+        holder.communicate("\n", timeout=30)
+    # lock released when the holder exits -> a new copy can start
+    third = _run_py("import sys, pathlib; sys.modules['tkinter'] = None\n"
+                    "from maplebot.app.gui import acquire_single_instance\n"
+                    "acquire_single_instance(pathlib.Path(sys.argv[1])); print('ok')\n", str(tmp_path))
+    out, err = third.communicate(timeout=30)
+    assert out.strip() == "ok", err
+
+
+def test_start_bat_single_instance_logic():
+    text = (__import__("pathlib").Path(__file__).resolve().parents[2] / "start.bat").read_bytes().decode("ascii")
+    launch = text[text.index(":launch"):]
+    # the pid file is only deleted after checking its PID isn't alive
+    assert launch.index("call :pid_alive") < launch.index('del /q "logs\\app.pid"')
+    # fallback checks the background copy before starting a console copy
+    fb = text[text.index(":fallback\r\n"):]
+    assert fb.index("call :pyw_alive") < fb.index('".venv\\Scripts\\python.exe" -m maplebot')
+    labels = set(__import__("re").findall(r"^:([a-z_]+)", text, __import__("re").M))
+    targets = set(__import__("re").findall(r"(?:goto|call) :([a-z_]+)", text)) - {"name"}
+    assert targets <= labels, targets - labels

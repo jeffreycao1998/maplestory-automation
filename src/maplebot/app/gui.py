@@ -208,6 +208,8 @@ class App:
         try:
             if not self.profile.mob_templates():
                 probs.append("No mob pictures saved")
+            if self.profile.player_template() is None:
+                probs.append("No name tag picture saved")
         except OSError:
             pass
         return probs
