@@ -167,3 +167,22 @@ n_mobs, target, hp, mp, flags, confidence` — anomalies (verdict ≠ OK, STUCK,
 - The process must be DPI-aware, or capture coordinates are wrong on scaled displays.
 - If the game runs elevated, the bot must too (Windows blocks input from a
   non-elevated process into an elevated one). The launcher self-elevates.
+
+## Profile and maps (main agent)
+Shared settings (keys, skill, potions, behaviour, safety, detection) live in
+`profile/settings.yaml`; each map has `profile/maps/<id>/map.yaml` (its `calibration`
+section + display `name`) and `templates/`. `Profile.load()/save()` merge/split them;
+`templates_dir`, `mob_templates()`, `player_template()` and `settings_path` always refer to
+the current map.
+```python
+class Profile:
+    def maps(self) -> list[tuple[str, str]]          # (map_id, name)
+    current_map: str;  def current_map_name(self) -> str
+    def map_is_set_up(self, map_id=None) -> bool     # minimap box + ≥1 mob picture
+    def switch_map(self, map_id: str) -> None
+    def create_map(self, name: str, copy_from: str | None = None) -> str   # becomes current;
+        # copies window title, HP/MP boxes, dot colour, name tag from the current map
+    def rename_map(self, map_id: str, new_name: str) -> None
+    def delete_map(self, map_id: str) -> None        # not the only map
+class MapError(ValueError)                           # user-facing message
+```

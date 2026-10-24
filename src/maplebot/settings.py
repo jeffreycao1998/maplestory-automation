@@ -5,19 +5,32 @@ Owner: main agent. One Settings object is passed to every part.
 Everything the user sets up lives in the profile folder (git-ignored):
 
     profile/
-      settings.yaml        # everything below, written by the setup wizard / settings tab
-      templates/
-        mob_*.png          # crops of mobs (any number)
-        player.png         # optional crop of your name tag
+      settings.yaml        # SHARED by all maps: keys, skill, potions, behaviour, safety,
+                           # detection, plus `current_map`
+      maps/<map-id>/
+        map.yaml           # PER MAP: the `calibration` section (minimap box, bars,
+                           # training area, dot colour) and a display `name`
+        templates/
+          mob_*.png        # crops of this map's mobs (any number)
+          player.png       # crop of your name tag
     logs/<run>/            # run logs (repo root, git-ignored)
+
+`Profile.load()` returns one merged Settings for the current map, and `Profile.save()`
+splits it back. `templates_dir`, `mob_templates()` and `player_template()` always refer
+to the current map, so callers don't need to know about maps at all.
+
+An old single-map profile (profile/settings.yaml with calibration + profile/templates/)
+is migrated automatically into maps/<id>/ the first time it's loaded.
 """
 from __future__ import annotations
 
 import dataclasses
 import os
+import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 try:                      # PyYAML is optional: JSON is valid YAML, so files stay readable either way
     import yaml
@@ -171,6 +184,20 @@ class Settings:
         return out
 
 
+MAP_SECTIONS = ("calibration",)          # Settings sections stored per map
+DEFAULT_MAP_NAME = "My first map"
+
+
+def map_id_for(name: str) -> str:
+    """Folder-safe id for a map name ("The Tree That Grew II" -> "the-tree-that-grew-ii")."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+    return slug[:60] or "map"
+
+
+class MapError(ValueError):
+    """A map operation the user asked for can't be done; message is user-facing."""
+
+
 @dataclass
 class Profile:
     root: Path
@@ -179,13 +206,26 @@ class Profile:
     def default(cls) -> "Profile":
         return cls(Path(os.environ.get("MAPLEBOT_PROFILE", REPO_ROOT / "profile")))
 
+    # ---- paths -----------------------------------------------------------
     @property
-    def settings_path(self) -> Path:
+    def shared_settings_path(self) -> Path:
         return self.root / "settings.yaml"
 
     @property
+    def maps_dir(self) -> Path:
+        return self.root / "maps"
+
+    def map_dir(self, map_id: Optional[str] = None) -> Path:
+        return self.maps_dir / (map_id or self.current_map)
+
+    @property
+    def settings_path(self) -> Path:
+        """The current map's file (exists once that map has been set up and saved)."""
+        return self.map_dir() / "map.yaml"
+
+    @property
     def templates_dir(self) -> Path:
-        return self.root / "templates"
+        return self.map_dir() / "templates"
 
     @property
     def logs_dir(self) -> Path:
@@ -198,21 +238,177 @@ class Profile:
         p = self.templates_dir / "player.png"
         return p if p.exists() else None
 
+    # ---- maps --------------------------------------------------------------
+    def _read(self, path: Path) -> dict:
+        if not path.exists():
+            return {}
+        with open(path, "r", encoding="utf-8") as f:
+            data = load_yaml_or_json(f.read())
+        return data if isinstance(data, dict) else {}
+
+    def _write(self, path: Path, data: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(dump_yaml_or_json(data))
+        os.replace(tmp, path)
+
+    def _migrate(self) -> None:
+        """Move an old single-map profile into maps/<id>/ (idempotent)."""
+        old_templates = self.root / "templates"
+        shared = self._read(self.shared_settings_path)
+        has_old_cal = any(k in shared for k in MAP_SECTIONS)
+        if self.maps_dir.exists() and not has_old_cal and not old_templates.exists():
+            return
+        if not has_old_cal and not old_templates.exists():
+            return
+        map_id = shared.get("current_map") or map_id_for(DEFAULT_MAP_NAME)
+        dest = self.maps_dir / map_id
+        dest.mkdir(parents=True, exist_ok=True)
+        map_data = self._read(dest / "map.yaml")
+        map_data.setdefault("name", DEFAULT_MAP_NAME)
+        for k in MAP_SECTIONS:
+            if k in shared:
+                map_data.setdefault(k, shared.pop(k))
+        self._write(dest / "map.yaml", map_data)
+        if old_templates.exists():
+            (dest / "templates").mkdir(parents=True, exist_ok=True)
+            for f in old_templates.iterdir():
+                target = dest / "templates" / f.name
+                if not target.exists():
+                    shutil.move(str(f), str(target))
+            try:
+                old_templates.rmdir()
+            except OSError:
+                pass
+        shared["current_map"] = map_id
+        self._write(self.shared_settings_path, shared)
+
+    def maps(self) -> List[Tuple[str, str]]:
+        """All saved maps as (map_id, display name), sorted by name."""
+        self._migrate()
+        out = []
+        if self.maps_dir.exists():
+            for d in self.maps_dir.iterdir():
+                if d.is_dir():
+                    name = self._read(d / "map.yaml").get("name") or d.name
+                    out.append((d.name, str(name)))
+        return sorted(out, key=lambda m: m[1].lower())
+
+    @property
+    def current_map(self) -> str:
+        self._migrate()
+        cur = self._read(self.shared_settings_path).get("current_map")
+        if cur and (self.maps_dir / cur).is_dir():
+            return cur
+        existing = self.maps_dir.is_dir() and sorted(d.name for d in self.maps_dir.iterdir() if d.is_dir())
+        return existing[0] if existing else map_id_for(DEFAULT_MAP_NAME)
+
+    def current_map_name(self) -> str:
+        return dict(self.maps()).get(self.current_map, DEFAULT_MAP_NAME)
+
+    def map_is_set_up(self, map_id: Optional[str] = None) -> bool:
+        d = self.map_dir(map_id)
+        cal = self._read(d / "map.yaml").get("calibration") or {}
+        return bool(cal.get("minimap_box")) and any((d / "templates").glob("mob_*.png"))
+
+    def switch_map(self, map_id: str) -> None:
+        if not (self.maps_dir / map_id).is_dir():
+            raise MapError(f"There's no saved map called '{map_id}'.")
+        shared = self._read(self.shared_settings_path)
+        shared["current_map"] = map_id
+        self._write(self.shared_settings_path, shared)
+
+    def create_map(self, name: str, copy_from: Optional[str] = None) -> str:
+        """Create a map and make it current. Copies from `copy_from` (default: the
+        current map, if any) the things that don't change between maps: the game
+        window title, HP/MP bar boxes, minimap dot colour and your name-tag picture.
+        Map-specific things (minimap box, mob pictures, training area) start empty."""
+        name = (name or "").strip()
+        if not name:
+            raise MapError("Give the map a name, e.g. 'The Tree That Grew II'.")
+        map_id = map_id_for(name)
+        if any(n.lower() == name.lower() for _, n in self.maps()):
+            raise MapError(f"You already have a map called '{name}'.")
+        base, i = map_id, 2
+        while (self.maps_dir / map_id).exists():
+            map_id, i = f"{base}-{i}", i + 1
+        src_id = copy_from if copy_from is not None else (
+            self.current_map if (self.maps_dir / self.current_map).is_dir() else None)
+        cal = Calibration()
+        if src_id and (self.maps_dir / src_id).is_dir():
+            src_cal = self._read(self.maps_dir / src_id / "map.yaml").get("calibration") or {}
+            for k in ("window_title", "hp_bar_box", "mp_bar_box",
+                      "player_dot_hsv_low", "player_dot_hsv_high"):
+                if src_cal.get(k) is not None:
+                    setattr(cal, k, src_cal[k])
+        dest = self.maps_dir / map_id
+        (dest / "templates").mkdir(parents=True, exist_ok=True)
+        if src_id:
+            tag = self.maps_dir / src_id / "templates" / "player.png"
+            if tag.exists():
+                shutil.copy2(tag, dest / "templates" / "player.png")
+        self._write(dest / "map.yaml", {"name": name, "calibration": dataclasses.asdict(cal)})
+        self.switch_map(map_id)
+        return map_id
+
+    def rename_map(self, map_id: str, new_name: str) -> None:
+        new_name = (new_name or "").strip()
+        if not new_name:
+            raise MapError("The map name can't be empty.")
+        if any(n.lower() == new_name.lower() and i != map_id for i, n in self.maps()):
+            raise MapError(f"You already have a map called '{new_name}'.")
+        path = self.maps_dir / map_id / "map.yaml"
+        if not path.parent.is_dir():
+            raise MapError(f"There's no saved map called '{map_id}'.")
+        data = self._read(path)
+        data["name"] = new_name
+        self._write(path, data)
+
+    def delete_map(self, map_id: str) -> None:
+        """Delete a map's setup. You can't delete the only map."""
+        ids = [i for i, _ in self.maps()]
+        if map_id not in ids:
+            raise MapError(f"There's no saved map called '{map_id}'.")
+        if len(ids) == 1:
+            raise MapError("You can't delete your only map. Create another one first.")
+        was_current = map_id == self.current_map
+        shutil.rmtree(self.maps_dir / map_id)
+        if was_current:
+            self.switch_map([i for i in ids if i != map_id][0])
+
+    # ---- settings ------------------------------------------------------------
     def ensure(self) -> None:
+        self._migrate()
         self.templates_dir.mkdir(parents=True, exist_ok=True)
+        if not self.settings_path.exists():
+            self._write(self.settings_path, {"name": DEFAULT_MAP_NAME})
+        shared = self._read(self.shared_settings_path)
+        if shared.get("current_map") != self.current_map:
+            shared["current_map"] = self.current_map
+            self._write(self.shared_settings_path, shared)
 
     def load(self) -> Settings:
-        if self.settings_path.exists():
-            with open(self.settings_path, "r", encoding="utf-8") as f:
-                return Settings.from_dict(load_yaml_or_json(f.read()))
-        return Settings()
+        self._migrate()
+        shared = self._read(self.shared_settings_path)
+        merged = {k: v for k, v in shared.items() if k not in MAP_SECTIONS and k != "current_map"}
+        map_data = self._read(self.settings_path)
+        for k in MAP_SECTIONS:
+            if k in map_data:
+                merged[k] = map_data[k]
+        return Settings.from_dict(merged or None)
 
     def save(self, settings: Settings) -> None:
         self.ensure()
-        tmp = self.settings_path.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(dump_yaml_or_json(settings.to_dict()))
-        os.replace(tmp, self.settings_path)
+        data = settings.to_dict()
+        shared = {k: v for k, v in data.items() if k not in MAP_SECTIONS}
+        shared["current_map"] = self.current_map
+        self._write(self.shared_settings_path, shared)
+        map_data = self._read(self.settings_path)
+        map_data.setdefault("name", self.current_map_name())
+        for k in MAP_SECTIONS:
+            map_data[k] = data[k]
+        self._write(self.settings_path, map_data)
 
 
 def load_yaml_or_json(text: str):
