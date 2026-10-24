@@ -19,6 +19,7 @@ Rules, in priority order (first match wins):
     WAIT     confidence < 0.5 or LOW_CONFIDENCE flag     -> STOP_WALK if walking else IDLE
     RECOVER  HP / MP below threshold, key set, pot cooldown passed -> USE_HP_POT / USE_MP_POT
     ENGAGE   mob in skill range on screen (or seen < 0.6 s ago)  -> STOP_WALK / FACE_* / ATTACK / IDLE
+             (won't turn toward a mob behind while one ahead was seen < 0.3 s ago)
     WAIT     no minimap position                          -> STOP_WALK if walking else IDLE
     PATROL   edges, approach visible mob, keep direction  -> WALK_* on change, else
     STUCK    still walking the same way, minimap x flat for stuck_s -> JUMP, else IDLE
@@ -42,6 +43,7 @@ DEAD_ZONE_PX = 12           # |dx| within this keeps the current facing
 LINGER_S = 0.6              # stay in ENGAGE this long after the last in-range sighting
 STUCK_EPS = 0.004           # minimap x must move more than this to count as moving
 TARGET_SWITCH_MARGIN_PX = 40  # a mob behind us must be this much nearer to make us turn
+TURN_HOLD_S = 0.3           # don't turn away from a mob seen ahead within this long
 
 LEFT, RIGHT = "left", "right"
 
@@ -77,6 +79,7 @@ class Behavior:
         self._last_hp_pot: float = -math.inf
         self._last_mp_pot: float = -math.inf
         self._last_in_range: float = -math.inf
+        self._ahead: Optional[Tuple[Mob, float]] = None   # (mob, t) last in-range mob ahead
         self._stuck_ref: Optional[Tuple[float, float]] = None   # (x, t) last movement
 
     def update_settings(self, settings: Settings) -> None:
@@ -119,7 +122,7 @@ class Behavior:
         return None
 
     def _rule_engage(self, p: Perception, now: float) -> Optional[Decision]:
-        target = self._pick_target(p)
+        target = self._pick_target(p, now)
         if target is None:
             if now - self._last_in_range < LINGER_S:
                 if self.walking:
@@ -138,12 +141,19 @@ class Behavior:
         need = self.facing if abs(dx) <= DEAD_ZONE_PX else _side(dx)
         if need != self.facing:
             return Decision(_FACE[need], "ENGAGE", target, f"turn {need}: {where}")
+        if target not in p.mobs:
+            where += " (last seen)"
         since = now - self._last_attack
         cd = self.settings.skill.cooldown_s
         if since >= cd:
             return Decision(Action.ATTACK, "ENGAGE", target, f"attack {where}")
         return Decision(Action.IDLE, "ENGAGE", target,
                         f"cooldown {cd - since:.2f}s, {where}")
+
+    def _held_ahead(self, now: float) -> Optional[Mob]:
+        if self._ahead is not None and now - self._ahead[1] < TURN_HOLD_S:
+            return self._ahead[0]
+        return None
 
     def _rule_wait_minimap(self, x: Optional[float]) -> Optional[Decision]:
         if x is None:
@@ -181,10 +191,11 @@ class Behavior:
         tol = self.settings.skill.vertical_tolerance_px
         return [m for m in p.mobs if abs(m.y - py) <= tol]
 
-    def _pick_target(self, p: Perception) -> Optional[Mob]:
-        """Nearest in-range mob by |dx|. A mob on the side we already face (or inside
-        the dead zone) is kept unless one behind us is TARGET_SWITCH_MARGIN_PX nearer,
-        so two mobs at similar distances don't make us flip back and forth."""
+    def _pick_target(self, p: Perception, now: float) -> Optional[Mob]:
+        """Nearest in-range mob by |dx|, with hysteresis: the nearest mob on the side we
+        face (or in the dead zone, or seen there < TURN_HOLD_S ago) is kept unless one
+        behind us is TARGET_SWITCH_MARGIN_PX nearer, so two mobs at similar distances
+        or a flickering detection don't make us flip back and forth."""
         if p.player_screen is None:
             return None
         px = p.player_screen[0]
@@ -196,14 +207,22 @@ class Behavior:
         nearest = min(in_range, key=key)
         ahead = [m for m in in_range
                  if abs(m.x - px) <= DEAD_ZONE_PX or _side(m.x - px) == self.facing]
-        if not ahead:
-            return nearest
-        best_ahead = min(ahead, key=key)
+        if ahead:
+            best_ahead = min(ahead, key=key)
+            self._ahead = (best_ahead, now)
+        else:
+            # The mob ahead may just have flickered out of detection: keep it as the
+            # candidate for TURN_HOLD_S so one missed frame doesn't spin us around.
+            best_ahead = self._held_ahead(now)
+            if best_ahead is None:
+                return nearest
         if abs(nearest.x - px) < abs(best_ahead.x - px) - TARGET_SWITCH_MARGIN_PX:
+            self._ahead = None           # deliberate switch: no hold
             return nearest
         return best_ahead
 
     def _patrol_choice(self, p: Perception, x: float) -> Tuple[str, str, Optional[Mob]]:
+        """(direction to walk, reason, mob being approached or None)."""
         if x <= self.map.patrol_left:
             self._edge_block = LEFT
             return RIGHT, "reached left edge", None
@@ -259,6 +278,7 @@ class Behavior:
             self.walking = None
             self._stuck_ref = None
         elif action in (Action.FACE_LEFT, Action.FACE_RIGHT):
+            self._ahead = None
             self.walking = None
             self._stuck_ref = None
             self.facing = LEFT if action is Action.FACE_LEFT else RIGHT
