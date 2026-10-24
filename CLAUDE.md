@@ -9,10 +9,10 @@ Start: one map, one ranged skill. Grow from there.
 |---|---|
 | OS | Windows (bot runs on the user's PC; Claude's sandbox is Linux) |
 | Server | _TBD (official Classic or private)_ |
-| Game resolution / mode | _TBD_ — windowed, never moved or resized during a run |
-| Class / skill | Magician — _TBD (e.g. Magic Claw / Energy Bolt)_ |
+| Game resolution / mode | 1366×768 windowed — never moved or resized during a run |
+| Class / skill | Magician (level ~13), Magic Claw. MP is the bottleneck — MP potions matter |
 | Keybinds | attack: _TBD_, jump: _TBD_, move: arrow keys |
-| First map | _TBD_ |
+| First map | Victoria Road: The Tree That Grew II — vertical map of sagging rope bridges with a central rope; Slimes + Stumps; green background. Real frame: `data/labeled/tree-that-grew-2/` |
 
 ## How work is organised
 You (the main agent) are the **orchestrator**. You own the plan, the shared contracts

@@ -60,6 +60,7 @@ class Detection:
     player_threshold: float = 0.75
     mirror_templates: bool = True
     downscale: float = 0.5     # match on a smaller image for speed (1.0 = full size)
+    player_tag_offset_px: int = 63   # how far above your name tag your body centre is
 
 
 @dataclass

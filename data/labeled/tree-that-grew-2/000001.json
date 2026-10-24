@@ -1,0 +1,22 @@
+{
+  "map": "victoria-road-the-tree-that-grew-2",
+  "source": "user screenshot 2026-10-23, 1366x768 windowed client; party member 'Tyul' present (orange minimap dot)",
+  "minimap_box": [15, 81, 166, 112],
+  "player_map": [0.506, 0.446],
+  "player_screen": [712, 451],
+  "player_note": "character is on the central rope/ladder, name tag 'AIGenerated' at [676, 492, 60, 15]",
+  "mobs": [
+    {"box": [176, 458, 48, 42], "kind": "slime"},
+    {"box": [762, 544, 48, 42], "kind": "slime"},
+    {"box": [825, 140, 48, 42], "kind": "slime"},
+    {"box": [750, 0, 48, 24], "kind": "slime", "note": "partly off the top of the screen"},
+    {"box": [740, 368, 52, 50], "kind": "stump"},
+    {"box": [398, 296, 52, 50], "kind": "stump", "note": "covered by a hit effect"}
+  ],
+  "hp": 0.428,
+  "mp": 0.030,
+  "hp_bar_box": [504, 751, 103, 14],
+  "mp_bar_box": [612, 751, 103, 14],
+  "flags": [],
+  "distractors": "other player 'Tyul' attacking, damage numbers, quest helper window top-right, party HP window right, chat bar bottom"
+}
