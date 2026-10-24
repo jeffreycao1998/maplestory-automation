@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from maplebot.behavior import DEAD_ZONE_PX, LINGER_S, TURN_HOLD_S, Behavior
+from maplebot.behavior import (DEAD_ZONE_PX, LINGER_S, OFF_PLATFORM_DEBOUNCE_S,
+                               TURN_HOLD_S, Behavior)
 from maplebot.mapmodel import MapModel
 from maplebot.types import Action, Flag
 
@@ -54,9 +55,12 @@ def test_wait_beats_recover_and_engage():
     assert d.state == "WAIT"
 
 
-def test_confidence_exactly_half_is_trusted():
-    b = make_behavior()
-    assert b.decide(perc(confidence=0.5), 0.0).state == "PATROL"
+def test_confidence_exactly_half_is_not_trusted():
+    # The Perceiver scores 0.5 exactly when the minimap dot is missing.
+    b = make_behavior(facing="right")
+    d = b.decide(perc(confidence=0.5, mobs=[X + 100]), 0.0)
+    assert (d.action, d.state) == (A.IDLE, "WAIT")
+    assert b.decide(perc(confidence=0.51), 0.1).state == "PATROL"
 
 
 @pytest.mark.parametrize("kw", [dict(map_x=None), dict(flags={Flag.MINIMAP_MISSING})])
@@ -70,11 +74,13 @@ def test_wait_on_missing_minimap(kw):
     assert "minimap" in d2.reason
 
 
-def test_engage_still_works_without_minimap():
-    # Shooting a mob in range on screen does not need the minimap position.
-    b = make_behavior()
+def test_no_engage_without_minimap_even_at_full_confidence():
+    b = make_behavior(facing="right")
     d = b.decide(perc(map_x=None, mobs=[X + 100]), 0.0)
-    assert (d.action, d.state) == (A.ATTACK, "ENGAGE")
+    assert (d.action, d.state) == (A.IDLE, "WAIT")
+    b = make_behavior(facing="right")
+    d = b.decide(perc(map_x=None, confidence=0.5, estimated=True, mobs=[X + 100]), 0.0)
+    assert d.state == "WAIT"
 
 
 # ---------------------------------------------------------------- RECOVER
@@ -114,7 +120,7 @@ def test_potion_cooldown_gates_and_releases():
 
 
 def test_potion_cooldown_falls_through_to_engage():
-    b = make_behavior(hp_key="1")
+    b = make_behavior(facing="right", hp_key="1")
     b.decide(perc(hp=0.2), 0.0)
     d = b.decide(perc(hp=0.2, mobs=[X + 100]), 0.1)
     assert (d.action, d.state) == (A.ATTACK, "ENGAGE")
@@ -148,7 +154,7 @@ def test_potion_does_not_change_walking_belief():
 
 # ---------------------------------------------------------------- ENGAGE
 def test_mob_right_in_range_attack():
-    b = make_behavior()
+    b = make_behavior(facing="right")
     d = b.decide(perc(mobs=[X + 180]), 0.0)
     assert (d.action, d.state) == (A.ATTACK, "ENGAGE")
     assert d.target.x == X + 180
@@ -199,16 +205,16 @@ def test_target_is_nearest_by_dx():
 
 
 def test_nearest_behind_wins_only_by_margin():
-    b = make_behavior()          # facing right
+    b = make_behavior(facing="right")
     d = b.decide(perc(mobs=[X + 120, X - 100]), 0.0)
     assert d.action is A.ATTACK and d.target.x == X + 120     # 20 px closer: keep facing
-    b = make_behavior()
+    b = make_behavior(facing="right")
     d = b.decide(perc(mobs=[X + 200, X - 100]), 0.0)
     assert d.action is A.FACE_LEFT and d.target.x == X - 100   # 100 px closer: turn
 
 
 def test_flicker_of_mob_ahead_does_not_turn_us():
-    b = make_behavior()                                  # facing right
+    b = make_behavior(facing="right")
     assert b.decide(perc(mobs=[X + 100, X - 150]), 0.0).action is A.ATTACK
     d = b.decide(perc(mobs=[X - 150]), 0.07)              # right mob missed one frame
     assert d.action is A.IDLE and b.facing == "right"
@@ -236,7 +242,7 @@ def test_approach_flicker_keeps_walking():
 
 @pytest.mark.parametrize("dx", [DEAD_ZONE_PX, -DEAD_ZONE_PX, 0, 5, -5])
 def test_dead_zone_keeps_facing(dx):
-    b = make_behavior()
+    b = make_behavior(facing="right")
     d = b.decide(perc(mobs=[X + dx]), 0.0)
     assert d.action is A.ATTACK and b.facing == "right"
     b.facing = "left"
@@ -251,7 +257,7 @@ def test_just_outside_dead_zone_turns():
 
 
 def test_attack_cooldown_gating():
-    b = make_behavior(skill__cooldown_s=0.65)
+    b = make_behavior(facing="right", skill__cooldown_s=0.65)
     f = perc(mobs=[X + 100])
     assert b.decide(f, 0.0).action is A.ATTACK
     d = b.decide(f, 0.3)
@@ -467,6 +473,7 @@ def test_edge_turn_beats_stuck():
 # ---------------------------------------------------------------- belief / API
 def test_belief_tracking_matches_controller_semantics():
     b = make_behavior()
+    assert (b.facing, b.walking) == (None, None)
     b.decide(perc(), 0.0)
     assert (b.facing, b.walking) == ("right", "right")
     b.decide(perc(mobs=[X - 100]), 0.1)                  # STOP_WALK
@@ -490,9 +497,10 @@ def test_reset_forgets_everything():
     b.decide(perc(mobs=[X - 100]), 0.1)      # face left
     b.decide(perc(mobs=[X - 100]), 0.2)      # attack
     b.reset()
-    assert (b.facing, b.walking) == ("right", None)
+    assert (b.facing, b.walking) == (None, None)
     assert b.decide(perc(hp=0.1), 0.3).action is A.USE_HP_POT     # pot cooldown gone
-    assert b.decide(perc(mobs=[X + 100]), 0.4).action is A.ATTACK  # attack cd gone
+    assert b.decide(perc(mobs=[X - 100]), 0.4).action is A.FACE_LEFT   # facing unknown again
+    assert b.decide(perc(mobs=[X - 100]), 0.5).action is A.ATTACK  # attack cd gone
     b.reset()
     assert b.decide(perc(), 0.45).action is A.WALK_RIGHT          # linger gone
 
@@ -528,3 +536,141 @@ def test_constructor_uses_given_map_model():
     m = MapModel.from_settings(make_settings(calibration__patrol_right=0.6))
     b = Behavior(s, m)
     assert b.decide(perc(map_x=0.61), 0.0).action is A.WALK_LEFT
+
+
+# ---------------------------------------------------------------- facing unknown at start
+@pytest.mark.parametrize("dx,first", [(100, A.FACE_RIGHT), (-100, A.FACE_LEFT),
+                                      (0, A.FACE_RIGHT), (-5, A.FACE_LEFT)])
+def test_first_engage_always_faces_first(dx, first):
+    b = Behavior(make_settings(), MapModel.from_settings(make_settings()))
+    assert b.facing is None
+    d1 = b.decide(perc(mobs=[X + dx]), 0.0)
+    d2 = b.decide(perc(mobs=[X + dx]), 0.07)
+    assert (d1.action, d1.state) == (first, "ENGAGE")
+    assert "facing unknown" in d1.reason
+    assert d2.action is A.ATTACK
+
+
+def test_character_actually_facing_left_still_turns_right():
+    # The blocker: belief "right" by assumption would skip FACE_RIGHT forever.
+    b = make_behavior()
+    acts = [b.decide(perc(mobs=[X + 150]), i * 0.07).action for i in range(20)]
+    assert acts[0] is A.FACE_RIGHT
+    assert acts.count(A.FACE_RIGHT) == 1 and A.ATTACK in acts
+
+
+def test_walking_makes_facing_known():
+    b = make_behavior()
+    walk_right(b)
+    assert b.facing == "right"
+    ds = run(b, [perc(mobs=[X + 100])] * 2, start=0.1)
+    assert [d.action for d in ds] == [A.STOP_WALK, A.ATTACK]   # no needless turn
+
+
+# ---------------------------------------------------------------- estimated position
+def test_no_engage_on_estimated_player_position():
+    b = make_behavior(facing="right")
+    d = b.decide(perc(estimated=True, mobs=[X + 100]), 0.0)
+    assert d.state == "PATROL" and d.action is A.WALK_RIGHT and d.target is None
+
+
+def test_no_approach_on_estimated_player_position():
+    b = make_behavior()
+    walk_right(b)
+    d = b.decide(perc(estimated=True, mobs=[X - 500]), 0.1)
+    assert d.action is A.IDLE and b.walking == "right"         # keeps patrolling by minimap
+
+
+def test_estimated_position_still_patrols_edges():
+    b = make_behavior()
+    walk_right(b)
+    d = b.decide(perc(estimated=True, map_x=0.71, mobs=[X + 100]), 0.1)
+    assert (d.action, d.reason) == (A.WALK_LEFT, "reached right edge")
+
+
+def test_estimated_position_stops_running_engagement():
+    b = make_behavior(facing="right")
+    assert b.decide(perc(mobs=[X + 100]), 0.0).action is A.ATTACK
+    d = b.decide(perc(estimated=True, mobs=[X + 100]), 0.1)
+    assert d.state == "ENGAGE" and d.action is A.IDLE and "linger" in d.reason
+
+
+# ---------------------------------------------------------------- OFF_PLATFORM
+def onplat(**kw):
+    return make_behavior(calibration__patrol_y=0.45, calibration__patrol_y_tolerance=0.04, **kw)
+
+
+def test_off_platform_stops_walking_then_idles():
+    b = onplat()
+    assert b.decide(perc(map_y=0.45), 0.0).action is A.WALK_RIGHT
+    d0 = b.decide(perc(map_y=0.62), 0.1)            # first off tick: debounce
+    assert d0.state == "PATROL"
+    d1 = b.decide(perc(map_y=0.62), 0.1 + OFF_PLATFORM_DEBOUNCE_S)
+    d2 = b.decide(perc(map_y=0.62), 0.5)
+    assert (d1.action, d1.state) == (A.STOP_WALK, "OFF_PLATFORM")
+    assert d1.reason == "not on the training bridge (y 0.62 vs 0.45)"
+    assert (d2.action, d2.state) == (A.IDLE, "OFF_PLATFORM")
+
+
+def test_off_platform_from_standstill_never_walks():
+    b = onplat()
+    acts = [b.decide(perc(map_y=0.30), i * 0.07) for i in range(30)]
+    assert not any(d.action in (A.WALK_LEFT, A.WALK_RIGHT) for d in acts[3:])
+    assert acts[-1].state == "OFF_PLATFORM"
+
+
+def test_off_platform_single_jitter_tick_ignored():
+    b = onplat()
+    b.decide(perc(map_y=0.45), 0.0)
+    for i, y in enumerate([0.45, 0.50, 0.45, 0.50, 0.45]):
+        d = b.decide(perc(map_y=y), 0.07 * (i + 1))
+        assert d.state == "PATROL"
+
+
+def test_tolerance_edges():
+    b = onplat()
+    assert b.decide(perc(map_y=0.4899), 0.0).state == "PATROL"     # 0.0399 off: on
+    assert b.decide(perc(map_y=0.4101), 1.0).state == "PATROL"
+    assert b.decide(perc(map_y=0.4901), 2.0).state == "OFF_PLATFORM"   # 0.0401 off
+    assert b.decide(perc(map_y=0.4099), 3.0).state == "OFF_PLATFORM"
+
+
+def test_off_platform_from_standstill_idles_immediately():
+    b = onplat()
+    d = b.decide(perc(map_y=0.62, mobs=[X + 500]), 0.0)
+    assert (d.action, d.state) == (A.IDLE, "OFF_PLATFORM")
+
+
+def test_back_on_platform_resumes_patrol():
+    b = onplat()
+    b.decide(perc(map_y=0.7), 0.0)
+    b.decide(perc(map_y=0.7), 1.0)
+    d = b.decide(perc(map_y=0.46), 1.1)
+    assert d.state == "PATROL" and d.action in (A.WALK_LEFT, A.WALK_RIGHT)
+
+
+def test_engage_allowed_off_platform():
+    b = onplat(facing="right")
+    assert b.decide(perc(map_y=0.7), 0.0).state == "OFF_PLATFORM"
+    d = b.decide(perc(map_y=0.7, mobs=[X + 100]), 1.0)
+    assert (d.action, d.state) == (A.ATTACK, "ENGAGE")
+
+
+def test_off_platform_blocks_approach_walk():
+    b = onplat()
+    b.decide(perc(map_y=0.7), 0.0)
+    d = b.decide(perc(map_y=0.7, mobs=[X + 500]), 1.0)
+    assert d.state == "OFF_PLATFORM" and d.action is A.IDLE
+
+
+def test_no_patrol_y_means_no_height_check():
+    b = make_behavior()
+    b.decide(perc(map_y=0.05), 0.0)
+    assert b.decide(perc(map_y=0.95), 1.0).state == "PATROL"
+
+
+def test_off_platform_does_not_trigger_stuck_jump():
+    b = onplat(behavior__stuck_s=0.5)
+    walk_right(b)
+    acts = [b.decide(perc(map_y=0.8), 0.1 + i * 0.1).action for i in range(20)]
+    assert A.JUMP not in acts

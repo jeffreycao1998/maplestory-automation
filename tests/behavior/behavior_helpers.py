@@ -15,15 +15,15 @@ def mob(x, y=PLAYER_Y, score=0.9):
 
 
 def perc(t=0.0, map_x=0.5, mobs=(), player=(PLAYER_X, PLAYER_Y), hp=1.0, mp=1.0,
-         confidence=1.0, flags=frozenset()):
+         confidence=1.0, flags=frozenset(), map_y=0.5, estimated=False):
     """Build a Perception. `mobs` may be Mob objects or plain x positions (same row)."""
     ms = tuple(m if isinstance(m, Mob) else mob(m) for m in mobs)
     return Perception(
         t=t,
         screen_size=(800, 600),
-        player_map=None if map_x is None else (map_x, 0.5),
+        player_map=None if map_x is None else (map_x, map_y),
         player_screen=player,
-        player_screen_estimated=False,
+        player_screen_estimated=estimated,
         mobs=ms,
         hp=hp,
         mp=mp,
@@ -42,6 +42,10 @@ def make_settings(**over):
     return s
 
 
-def make_behavior(**over):
+def make_behavior(facing=None, **over):
+    """A fresh Behavior. `facing` presets the facing belief (default: unknown, as at
+    start-up); tests about targeting logic pass facing="right" to skip the first turn."""
     s = make_settings(**over)
-    return Behavior(s, MapModel.from_settings(s))
+    b = Behavior(s, MapModel.from_settings(s))
+    b.facing = facing
+    return b

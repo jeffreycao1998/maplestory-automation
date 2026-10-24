@@ -25,8 +25,9 @@ Rules, in priority order (first match wins):
     WAIT     no minimap position                          -> STOP_WALK if walking else IDLE
     ENGAGE   mob in skill range on screen (or seen < 0.6 s ago)  -> STOP_WALK / FACE_* / ATTACK / IDLE
              (won't turn toward a mob behind while one ahead was seen < 0.3 s ago)
-    OFF_PLATFORM  patrol_y set and minimap y outside patrol_y +- tolerance for
-             OFF_PLATFORM_DEBOUNCE_S                      -> STOP_WALK if walking else IDLE
+    OFF_PLATFORM  patrol_y set and minimap y outside patrol_y +- tolerance
+             -> IDLE (never starts a walk); a walk already under way is stopped
+                (STOP_WALK) once y has been off for OFF_PLATFORM_DEBOUNCE_S
     PATROL   edges, approach visible mob, keep direction  -> WALK_* on change, else
     STUCK    still walking the same way, minimap x flat for stuck_s -> JUMP, else IDLE
 
@@ -196,12 +197,12 @@ class Behavior:
             return None
         if self._off_since is None:
             self._off_since = now
-        if now - self._off_since < OFF_PLATFORM_DEBOUNCE_S:
-            return None                              # maybe dot jitter: keep going for now
         why = f"not on the training bridge (y {y:.2f} vs {m.patrol_y:.2f})"
-        if self.walking:
-            return Decision(Action.STOP_WALK, "OFF_PLATFORM", reason=why)
-        return Decision(Action.IDLE, "OFF_PLATFORM", reason=why)
+        if not self.walking:
+            return Decision(Action.IDLE, "OFF_PLATFORM", reason=why)   # never start a walk
+        if now - self._off_since < OFF_PLATFORM_DEBOUNCE_S:
+            return None                  # maybe 1-px dot jitter: keep the walk going a moment
+        return Decision(Action.STOP_WALK, "OFF_PLATFORM", reason=why)
 
     def _rule_patrol(self, p: Perception, x: float, now: float) -> Decision:
         want, reason, target = self._patrol_choice(p, x, now)
