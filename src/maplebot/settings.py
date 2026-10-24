@@ -285,9 +285,12 @@ class Profile:
         self._write(self.shared_settings_path, shared)
 
     def maps(self) -> List[Tuple[str, str]]:
-        """All saved maps as (map_id, display name), sorted by name."""
+        """All saved maps as (map_id, display name), sorted by name. A brand-new profile
+        lists its default map even before anything has been saved."""
         self._migrate()
         out = []
+        if not self.maps_dir.is_dir() or not any(d.is_dir() for d in self.maps_dir.iterdir()):
+            return [(map_id_for(DEFAULT_MAP_NAME), DEFAULT_MAP_NAME)]
         if self.maps_dir.exists():
             for d in self.maps_dir.iterdir():
                 if d.is_dir():
@@ -327,9 +330,12 @@ class Profile:
         name = (name or "").strip()
         if not name:
             raise MapError("Give the map a name, e.g. 'The Tree That Grew II'.")
+        if not self.maps_dir.is_dir() or not any(d.is_dir() for d in self.maps_dir.iterdir()):
+            self.ensure()            # materialise the default map so it can be copied from
         map_id = map_id_for(name)
-        if any(n.lower() == name.lower() for _, n in self.maps()):
-            raise MapError(f"You already have a map called '{name}'.")
+        existing = [n for _, n in self.maps() if n.lower() == name.lower()]
+        if existing:
+            raise MapError(f"You already have a map called '{existing[0]}'.")
         base, i = map_id, 2
         while (self.maps_dir / map_id).exists():
             map_id, i = f"{base}-{i}", i + 1
@@ -367,7 +373,7 @@ class Profile:
 
     def delete_map(self, map_id: str) -> None:
         """Delete a map's setup. You can't delete the only map."""
-        ids = [i for i, _ in self.maps()]
+        ids = [i for i, _ in self.maps() if (self.maps_dir / i).is_dir()]
         if map_id not in ids:
             raise MapError(f"There's no saved map called '{map_id}'.")
         if len(ids) == 1:
