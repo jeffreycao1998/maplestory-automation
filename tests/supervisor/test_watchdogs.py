@@ -443,3 +443,9 @@ def test_stuck_window_read_from_settings():
     for i in range(6):
         sup2.note_decision(stuck_jump(), i * 3.0)
     assert sup2.check(make_p(15.0), 15.0).kind == VerdictKind.PAUSE
+
+
+def test_far_above_platform_also_pauses():
+    sup = platform_sup()                               # e.g. climbed the central rope
+    t, v = first_non_ok(drive(sup, 0, 3, (0.5, 0.30), [ENGAGE]))
+    assert v.kind == VerdictKind.PAUSE and t == pytest.approx(2.0)
