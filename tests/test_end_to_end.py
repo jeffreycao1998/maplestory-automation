@@ -197,3 +197,45 @@ def test_bad_hotkey_is_a_setup_problem(world):
     settings.safety.stop_hotkey = settings.safety.pause_hotkey
     with pytest.raises(RunnerError, match="different"):
         BotRunner(profile, settings, backend=FakeBackend(), use_hotkeys=False).run()
+
+
+def test_pause_landing_during_resume_wins(world, monkeypatch):
+    """Re-review finding 1: a second F11 arriving while the worker processes a resume."""
+    seq, settings, profile = world
+    r, backend, _ = _runner(seq, settings, profile, frames=None)
+    t = threading.Thread(target=r.run, daemon=True)
+    t.start()
+    time.sleep(0.4)
+    for _ in range(30):                      # hammer pause/resume/pause from this thread
+        r.pause(); r.resume(); r.pause()
+        time.sleep(0.02)
+        assert r.paused
+    time.sleep(0.3)
+    assert r.status.paused and backend.held == set()
+    assert r._controller is not None and r._controller.inhibited
+    r.stop()
+    t.join(5)
+
+
+def test_facing_relearned_after_resume(world):
+    """Re-review finding 2: after a pause the next turn must actually press the key."""
+    from maplebot.controls import Controller
+    from maplebot.types import Action
+    seq, settings, _ = world
+    b = FakeBackend()
+    c = Controller(settings, b)
+    c.execute(Action.FACE_RIGHT, 0.0)
+    c.inhibit("pause")
+    c.allow()                                 # user may have turned the character meanwhile
+    n = len(b.events)
+    c.execute(Action.FACE_RIGHT, 1.0)
+    assert len(b.events) > n, "FACE_RIGHT after resume must tap even if belief says right"
+    c.close()
+
+
+def test_refuses_to_start_without_name_tag(world):
+    """Re-review finding 3: without the name tag the bot can never attack."""
+    seq, settings, profile = world
+    (profile.templates_dir / "player.png").unlink()
+    with pytest.raises(RunnerError, match="name tag"):
+        BotRunner(profile, settings, backend=FakeBackend(), use_hotkeys=False).run()

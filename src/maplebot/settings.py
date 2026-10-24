@@ -50,8 +50,12 @@ class Calibration:
     mp_bar_box: Optional[List[int]] = None
     patrol_left: float = 0.30                 # minimap x fraction
     patrol_right: float = 0.70
-    patrol_y: Optional[float] = None          # minimap y of the training platform (set with the edges)
-    patrol_y_tolerance: float = 0.08          # further than this from patrol_y = fell off / wrong platform (bridges sag ~0.05-0.08; next bridge ~0.11 away)
+    patrol_y: Optional[float] = None          # minimap y of the bridge ENDS (set with the edges)
+    # On-platform band is [patrol_y - above, patrol_y + below]. Bridges sag downward
+    # (~0.06-0.07 of minimap height on The Tree That Grew II) and you only ever fall down;
+    # the next bridge down is ~0.117 below the ends.
+    patrol_y_tolerance: float = 0.10          # how far BELOW patrol_y still counts as on the bridge
+    patrol_y_tolerance_above: float = 0.03    # how far ABOVE patrol_y still counts as on the bridge
     player_dot_hsv_low: List[int] = field(default_factory=lambda: [20, 150, 180])
     player_dot_hsv_high: List[int] = field(default_factory=lambda: [35, 255, 255])
 

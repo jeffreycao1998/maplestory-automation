@@ -120,6 +120,9 @@ class BotRunner:
         mob_templates = self.profile.mob_templates()
         if not mob_templates:
             raise RunnerError("No mob pictures saved yet. Open the setup wizard and box a mob.")
+        if self.profile.player_template() is None:
+            raise RunnerError("No picture of your name tag saved yet. Open the setup wizard and box the "
+                              "name tag under your character — the bot needs it to know where you are.")
         try:
             map_model = MapModel.from_settings(s)
         except ValueError as e:
@@ -208,10 +211,16 @@ class BotRunner:
                     resume_now = self._resume_pending
                     self._resume_pending = False
                     paused = self._paused
+                    if resume_now and not paused:
+                        # Lift the inhibit while holding the runner lock: a pause() that
+                        # races in now sets _paused only after this, and its inhibit()
+                        # then runs after allow() — so a new pause always wins.
+                        # (Lock order is runner -> controller; pause()/stop() release the
+                        # runner lock before calling inhibit(), so this can't deadlock.)
+                        controller.allow()
                 if resume_now and not paused:
                     behavior.reset()
                     supervisor.reset(tick_t0 if own_capture else (t_start or 0.0))
-                    controller.allow()
 
                 if paused:
                     if t_start is not None and own_capture:

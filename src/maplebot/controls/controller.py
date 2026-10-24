@@ -159,10 +159,15 @@ class Controller:
             self.release_all()
 
     def allow(self) -> None:
-        """Re-enable execute() after inhibit() (e.g. when the user resumes)."""
+        """Re-enable execute() after inhibit() (e.g. when the user resumes).
+
+        The user may have turned the character while the bot was paused, so the
+        real facing is unknown again: the next FACE_* always taps.
+        """
         with self._lock:
             self._inhibited = False
             self._inhibit_reason = ""
+            self._facing_known = False
 
     def execute(self, action: Action, now: float) -> None:
         """Perform one Action. A no-op (zero key events) while inhibited.
