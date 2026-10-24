@@ -9,8 +9,10 @@ reads in the app.
 Rules:
 - Once a PAUSE or STOP is returned it is *sticky*: every later `check()` returns it
   again until `reset()` (user resumed) or `start()` (new run).
-- STOP outranks PAUSE. A latched PAUSE is upgraded to STOP if a STOP condition
-  appears while paused; a STOP is never downgraded.
+- STOP outranks PAUSE: if both are due on the same check, STOP is returned, and a
+  STOP is never downgraded to PAUSE. (A latched PAUSE can only become STOP if
+  `check()` is still being called; the runner does not call it while paused, so in
+  practice a pause stays a pause until the user resumes or stops.)
 - If the supervisor itself fails, it returns STOP (default to stopping).
 """
 from __future__ import annotations
@@ -24,8 +26,11 @@ from maplebot.types import Action, Decision, Flag, Perception, Verdict, VerdictK
 
 log = logging.getLogger(__name__)
 
-STUCK_WINDOW_S = 60.0      # stuck-jumps are counted over this sliding window
-HP_CRITICAL_HOLD_S = 1.0   # HP must stay critical this long before STOP
+# Defaults for values that may later become Settings.safety fields; read through
+# getattr so promoting them to settings needs no code change here.
+DEFAULT_STUCK_WINDOW_S = 60.0     # stuck-jumps are counted over this sliding window
+DEFAULT_HP_CRITICAL_HOLD_S = 1.0  # HP must stay critical this long before STOP
+OFF_PLATFORM_STATE = "OFF_PLATFORM"
 
 _OK = Verdict(VerdictKind.OK)
 _RANK = {VerdictKind.OK: 0, VerdictKind.PAUSE: 1, VerdictKind.STOP: 2}
@@ -88,6 +93,8 @@ class Supervisor:
         self._no_mobs = _Since()
         self._hp_low = _Since()
         self._low_conf = _Since()
+        self._hp_unreadable = _Since()
+        self._off_platform = _Since()     # fed by note_decision
         self._stuck_jumps: Deque[float] = deque()
 
     # ---- lifecycle ------------------------------------------------------
@@ -104,13 +111,23 @@ class Supervisor:
         if self._start_t is None:
             self._start_t = now
         self._latched = _OK
-        for timer in (self._player_lost, self._no_mobs, self._hp_low, self._low_conf):
+        for timer in (self._player_lost, self._no_mobs, self._hp_low, self._low_conf,
+                      self._hp_unreadable, self._off_platform):
             timer.clear()
         self._stuck_jumps.clear()
 
     def update_settings(self, settings: Settings) -> None:
         """New thresholds apply from the next check; running timers are kept."""
         self.settings = settings
+
+    @property
+    def stuck_window_s(self) -> float:
+        return float(getattr(self.settings.safety, "stuck_window_s", DEFAULT_STUCK_WINDOW_S))
+
+    @property
+    def hp_critical_hold_s(self) -> float:
+        return float(getattr(self.settings.safety, "hp_critical_hold_s",
+                             DEFAULT_HP_CRITICAL_HOLD_S))
 
     def elapsed(self, now: float) -> float:
         return 0.0 if self._start_t is None else max(0.0, now - self._start_t)
@@ -123,8 +140,13 @@ class Supervisor:
     # ---- inputs ---------------------------------------------------------
     def note_decision(self, d: Decision, now: float) -> None:
         try:
-            if d is not None and str(d.state).upper() == "STUCK" and d.action == Action.JUMP:
+            if d is None:
+                return
+            state = str(d.state).upper()
+            if state == "STUCK" and d.action == Action.JUMP:
                 self._stuck_jumps.append(now)
+            # OFF_PLATFORM must hold over consecutive decisions; any other state clears it.
+            self._off_platform.update(state == OFF_PLATFORM_STATE, now)
         except Exception:  # never let bookkeeping crash the loop
             log.exception("Supervisor.note_decision failed")
 
@@ -158,8 +180,12 @@ class Supervisor:
             hp_low_for = self._hp_low.update(hp < s.hp_critical, now)
         else:
             hp_low_for = 0.0
+        hp_unreadable_for = self._hp_unreadable.update(hp is None, now)
+        off_platform_for = self._off_platform.held(now)
+        hold_s = self.hp_critical_hold_s
+        window_s = self.stuck_window_s
 
-        cutoff = now - STUCK_WINDOW_S
+        cutoff = now - window_s
         while self._stuck_jumps and self._stuck_jumps[0] < cutoff:
             self._stuck_jumps.popleft()
         n_stuck = len(self._stuck_jumps)
@@ -167,11 +193,11 @@ class Supervisor:
         found: list[Verdict] = []
 
         # -- STOP conditions
-        if hp is not None and hp < s.hp_critical and hp_low_for >= HP_CRITICAL_HOLD_S:
+        if hp is not None and hp < s.hp_critical and hp_low_for >= hold_s:
             found.append(Verdict(
                 VerdictKind.STOP,
                 f"HP has been below {_pct(s.hp_critical)} for over "
-                f"{_fmt_duration(HP_CRITICAL_HOLD_S)} (now {_pct(hp)}) — stopping so your "
+                f"{_fmt_duration(hold_s)} (now {_pct(hp)}) — stopping so your "
                 "character doesn't die. Check your HP potions and potion key, and that the "
                 "HP bar is calibrated correctly."))
         if s.max_runtime_min and s.max_runtime_min > 0:
@@ -183,6 +209,17 @@ class Supervisor:
                     "as planned. You can change this limit in the safety settings."))
 
         # -- PAUSE conditions
+        if hp_unreadable_for >= s.hp_unreadable_pause_s:
+            found.append(Verdict(
+                VerdictKind.PAUSE,
+                f"Can't read your HP bar for {_fmt_duration(s.hp_unreadable_pause_s)} — the "
+                "bot can't tell if your character is in danger. Check nothing covers the HP "
+                "bar, or redo that setup step."))
+        if self._off_platform.since is not None and off_platform_for >= s.platform_lost_s:
+            found.append(Verdict(
+                VerdictKind.PAUSE,
+                "Your character isn't on the training platform any more — it may have "
+                "fallen to another bridge. Move it back and resume."))
         if lost_for >= s.player_lost_s:
             found.append(Verdict(
                 VerdictKind.PAUSE,
@@ -199,7 +236,7 @@ class Supervisor:
             found.append(Verdict(
                 VerdictKind.PAUSE,
                 f"Your character got stuck {n_stuck} times in the last "
-                f"{_fmt_duration(STUCK_WINDOW_S)} and jumping didn't free it — it may be "
+                f"{_fmt_duration(window_s)} and jumping didn't free it — it may be "
                 "caught on a rope, ladder or wall. Move it back into the patrol area and "
                 "resume."))
         if no_mobs_for >= s.no_mobs_pause_s:

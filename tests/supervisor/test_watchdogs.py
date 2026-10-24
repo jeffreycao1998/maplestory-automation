@@ -271,3 +271,114 @@ def test_internal_error_returns_stop(sup):
     assert sup.check(bad, 1.0).kind == VerdictKind.OK
     assert sup.check(object(), 2.0).kind == VerdictKind.STOP   # ...garbage is not
     assert "internal error" in sup.verdict.reason
+
+
+# ---- HP unreadable ------------------------------------------------------------------------
+def test_hp_unreadable_triggers_pause(sup):
+    run(sup, 0, 1)
+    res = run(sup, 1.0, 11.5, hp=None)
+    t, v = first_non_ok(res)
+    assert v.kind == VerdictKind.PAUSE and t == pytest.approx(11.0)
+    assert v.reason.startswith("Can't read your HP bar for 10 s — the bot can't tell")
+    assert "redo that setup step" in v.reason
+
+
+def test_hp_unreadable_just_under_threshold_ok(sup):
+    assert first_non_ok(run(sup, 0, 9.95, hp=None)) is None
+
+
+def test_hp_unreadable_interrupted_ok(sup):
+    run(sup, 0, 9.0, hp=None)
+    run(sup, 9.0, 9.1, hp=0.8)                     # one good reading resets it
+    assert first_non_ok(run(sup, 9.1, 19.0, hp=None)) is None
+
+
+def test_hp_unreadable_reset_clears(sup):
+    run(sup, 0, 9.5, hp=None)
+    sup.reset(9.5)
+    assert first_non_ok(run(sup, 9.5, 19.4, hp=None)) is None
+
+
+# ---- off platform --------------------------------------------------------------------------
+def off_platform():
+    return Decision(Action.IDLE, "OFF_PLATFORM", reason="minimap y below platform")
+
+
+def drive(sup, start, end, decision):
+    """Runner order: check() then note_decision() each tick."""
+    out = []
+    for i in range(int(round((end - start) / DT))):
+        t = round(start + i * DT, 6)
+        out.append((t, sup.check(make_p(t), t)))
+        sup.note_decision(decision, t)
+    return out
+
+
+def test_off_platform_triggers_pause(sup):
+    drive(sup, 0, 1, Decision(Action.WALK_LEFT, "PATROL"))
+    res = drive(sup, 1.0, 3.5, off_platform())
+    t, v = first_non_ok(res)
+    # first OFF_PLATFORM noted at 1.0 → 2.0 s held at the check on t=3.0
+    assert v.kind == VerdictKind.PAUSE and t == pytest.approx(3.0)
+    assert v.reason == ("Your character isn't on the training platform any more — it may "
+                        "have fallen to another bridge. Move it back and resume.")
+
+
+def test_off_platform_just_under_threshold_ok(sup):
+    res = drive(sup, 0, 2.0, off_platform())       # held 1.9 s at last check
+    assert first_non_ok(res) is None
+
+
+def test_off_platform_interrupted_ok(sup):
+    drive(sup, 0, 1.8, off_platform())
+    drive(sup, 1.8, 1.9, Decision(Action.WALK_RIGHT, "RECOVER"))  # back on platform
+    assert first_non_ok(drive(sup, 1.9, 3.8, off_platform())) is None
+
+
+def test_off_platform_without_decisions_never_triggers(sup):
+    sup.note_decision(off_platform(), 0.0)
+    sup.note_decision(Decision(Action.IDLE, "PATROL"), 0.1)
+    assert first_non_ok(run(sup, 0.2, 20)) is None
+
+
+def test_off_platform_reset_clears(sup):
+    drive(sup, 0, 1.9, off_platform())
+    sup.reset(1.9)
+    assert sup.check(make_p(2.5), 2.5).kind == VerdictKind.OK
+    sup.note_decision(off_platform(), 2.5)
+    assert sup.check(make_p(4.4), 4.4).kind == VerdictKind.OK
+    assert sup.check(make_p(4.5), 4.5).kind == VerdictKind.PAUSE
+
+
+# ---- promotable constants via getattr ------------------------------------------------------
+def test_defaults_when_settings_lack_fields(sup):
+    assert not hasattr(sup.settings.safety, "stuck_window_s")
+    assert sup.stuck_window_s == 60.0 and sup.hp_critical_hold_s == 1.0
+
+
+def _with_extra(**extra):
+    s = make_settings()
+    for k, v in extra.items():
+        object.__setattr__(s.safety, k, v)        # simulate a future settings field
+    return s
+
+
+def test_hp_critical_hold_read_from_settings():
+    sup = Supervisor(_with_extra(hp_critical_hold_s=0.3))
+    sup.start(0.0)
+    t, v = first_non_ok(run(sup, 0, 1.0, hp=0.05))
+    assert v.kind == VerdictKind.STOP and t == pytest.approx(0.3)
+
+
+def test_stuck_window_read_from_settings():
+    sup = Supervisor(_with_extra(stuck_window_s=10.0))
+    sup.start(0.0)
+    for i in range(6):                             # 6 jumps over 15 s: OK with a 10 s window
+        t = i * 3.0
+        sup.note_decision(stuck_jump(), t)
+        assert sup.check(make_p(t), t).kind == VerdictKind.OK
+    sup2 = Supervisor(make_settings())             # same sequence with default 60 s → PAUSE
+    sup2.start(0.0)
+    for i in range(6):
+        sup2.note_decision(stuck_jump(), i * 3.0)
+    assert sup2.check(make_p(15.0), 15.0).kind == VerdictKind.PAUSE

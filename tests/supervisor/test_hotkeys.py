@@ -149,3 +149,36 @@ def test_start_stop_with_fake_listener(monkeypatch):
     hk.stop()
     hk.stop()
     assert created[0].stopped == 1 and not hk.running
+
+
+def test_parse_key_importable_without_pynput(tmp_path):
+    """settings.problems() imports parse_key; it must work with pynput unavailable."""
+    import subprocess
+    import textwrap
+    from pathlib import Path
+    src = Path(__file__).resolve().parents[2] / "src"
+    code = textwrap.dedent("""
+        import builtins, sys
+        sys.path.insert(0, sys.argv[1])
+        real = builtins.__import__
+        def guard(name, *a, **k):
+            if name == "pynput" or name.startswith("pynput."):
+                raise ImportError("blocked")
+            return real(name, *a, **k)
+        builtins.__import__ = guard
+        from maplebot.supervisor.hotkeys import parse_key
+        assert parse_key("f11") == ("special", "f11")
+        from maplebot.settings import Settings
+        s = Settings()
+        s.calibration.minimap_box = [0, 0, 10, 10]
+        s.calibration.hp_bar_box = [0, 0, 10, 10]
+        print(repr(s.problems()))
+        s.safety.stop_hotkey = "f11"
+        assert s.problems(), "same pause/stop key should be reported"
+        assert "pynput" not in sys.modules
+        print("OK")
+    """)
+    r = subprocess.run([sys.executable, "-I", "-c", code, str(src)],
+                       capture_output=True, text=True, cwd=tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip().endswith("OK")
