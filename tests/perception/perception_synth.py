@@ -37,7 +37,10 @@ def mob_sprite(seed: int, w: int = 48, h: int = 40) -> np.ndarray:
     spr = np.zeros((h, w, 3), np.uint8)
     spr[:] = rng.integers(40, 90, 3)
     base = tuple(int(v) for v in rng.integers(60, 255, 3))
-    cv2.ellipse(spr, (w // 2, h // 2 + 3), (w // 2 - 4, h // 2 - 6), 0, 0, 360, base, -1)
+    cv2.ellipse(spr, (w // 2, h // 2 + 3), (max(1, w // 2 - 4), max(1, h // 2 - 6)), 0, 0, 360, base, -1)
+    # strongly one-sided shading so the mirror image is a different picture
+    ramp = np.linspace(-50, 50, w, dtype=np.float32)[None, :, None]
+    spr = np.clip(spr.astype(np.float32) + ramp, 0, 255).astype(np.uint8)
     # asymmetric features: eye on one side, stripe on the other
     cv2.circle(spr, (w // 4, h // 3), 4, (255, 255, 255), -1)
     cv2.circle(spr, (w // 4, h // 3), 2, (0, 0, 0), -1)

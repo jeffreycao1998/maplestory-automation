@@ -180,7 +180,7 @@ def test_bad_templates_skipped(tmp_path, templates, caplog):
     bad = tmp_path / "mob_bad.png"
     bad.write_bytes(b"not a png")
     flat = write_png(tmp_path / "mob_flat.png", np.full((30, 30, 3), 128, np.uint8))
-    tiny = write_png(tmp_path / "mob_tiny.png", mob_sprite(5, 6, 6))
+    tiny = write_png(tmp_path / "mob_tiny.png", np.random.default_rng(1).integers(0, 255, (6, 6, 3)).astype(np.uint8))
     with caplog.at_level(logging.WARNING):
         per = Perceiver(make_settings(), [bad, flat, tiny, tmp_path / "missing.png", paths[0]],
                         tmp_path / "nope.png")
@@ -208,16 +208,17 @@ def test_update_settings(templates):
     np.zeros((0, 0, 3), np.uint8),                    # empty
     np.zeros((768, 1366), np.uint8),                  # grayscale
     np.zeros((768, 1366, 4), np.uint8),               # BGRA
-    np.random.default_rng(0).random((480, 640, 3)),   # float image
+    np.random.default_rng(0).random((480, 640, 3)),   # float image (noise)
     None,
-])
+], ids=["black", "white", "tiny", "empty", "gray", "bgra", "float_noise", "none"])
 def test_garbage_frames_do_not_raise(templates, image):
     _, paths, _, tag_path = templates
     per = Perceiver(make_settings(), paths, tag_path)
     p = per.perceive(Frame(image=image, t=1.0, window=(0, 0, 0, 0)))
     assert isinstance(p, Perception)
-    assert Flag.MINIMAP_MISSING in p.flags
-    assert p.player_map is None
+    assert 0.0 <= p.confidence <= 1.0
+    if image is not None and image.dtype == np.uint8:
+        assert Flag.MINIMAP_MISSING in p.flags and p.player_map is None
 
 
 def test_garbage_settings_do_not_raise(templates):

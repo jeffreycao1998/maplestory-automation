@@ -47,7 +47,10 @@ PLAYER_ESTIMATE_X_FRAC = 0.5
 PLAYER_ESTIMATE_Y_FRAC = 0.62
 
 # --- mob matching ------------------------------------------------------------------------
-MIN_TEMPLATE_PX = 6          # a template smaller than this after downscaling is skipped
+PLAYER_COARSE_PEAKS = 3      # name-tag candidates refined at full resolution
+PLAYER_COARSE_MARGIN = 0.25  # coarse score may be this much below player_threshold
+
+MIN_TEMPLATE_PX = 6         # a template smaller than this after downscaling is skipped
 MAX_CANDIDATES_PER_TEMPLATE = 200   # bound NMS work on noisy frames
 MAX_MOBS = 40
 NMS_IOU = 0.3                # boxes overlapping more than this are the same mob
@@ -155,6 +158,7 @@ class Perceiver:
 
         self.settings = settings
         self._prepared: List[_Prepared] = []
+        self._player_small: Optional[np.ndarray] = None
         self._prep_key = None
         self.update_settings(settings)
 
@@ -180,6 +184,13 @@ class Perceiver:
                     continue
                 prepared.append(_Prepared(name, np.ascontiguousarray(g), t.w, t.h))
         self._prepared = prepared
+        self._player_small = None
+        if self._player is not None and scale < 1.0:
+            g = cv2.resize(self._player.gray, (max(1, int(round(self._player.w * scale))),
+                                               max(1, int(round(self._player.h * scale)))),
+                           interpolation=cv2.INTER_AREA)
+            if min(g.shape[:2]) >= 4 and _usable_template(g):
+                self._player_small = np.ascontiguousarray(g)
         self._prep_key = key
 
     def _scale(self) -> float:
@@ -230,16 +241,21 @@ class Perceiver:
             flags.add(Flag.MINIMAP_MISSING)
 
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        scale = self._scale()
+        small = None
+        if scale < 1.0:
+            small = cv2.resize(gray, (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+                               interpolation=cv2.INTER_AREA)
 
         # 2. mobs
-        mobs = self._find_mobs(gray, float(det.mob_threshold),
+        mobs = self._find_mobs(gray, small if small is not None else gray, float(det.mob_threshold),
                                [b for b in (minimap_box, hp_box, mp_box) if b is not None])
 
         # 3. player
         player_screen: Optional[PointPx] = None
         estimated = True
         if self._player is not None:
-            found = self._find_player(gray, float(det.player_threshold))
+            found = self._find_player(gray, small)
             if found is not None:
                 player_screen, estimated = found, False
         if estimated:
@@ -264,16 +280,11 @@ class Perceiver:
         )
 
     # ---- mobs -------------------------------------------------------------------------
-    def _find_mobs(self, gray: np.ndarray, threshold: float, exclude: Sequence[Box]) -> List[Mob]:
+    def _find_mobs(self, gray: np.ndarray, small: np.ndarray, threshold: float,
+                   exclude: Sequence[Box]) -> List[Mob]:
+        """`small` is `gray` downscaled by detection.downscale (or `gray` itself at 1.0)."""
         if not self._prepared:
             return []
-        scale = self._scale()
-        if scale != 1.0:
-            small = cv2.resize(gray, (max(1, int(round(gray.shape[1] * scale))),
-                                      max(1, int(round(gray.shape[0] * scale)))),
-                               interpolation=cv2.INTER_AREA)
-        else:
-            small = gray
         sh, sw = small.shape[:2]
         # Actual scale per axis (rounding) so coordinates map back exactly.
         fx = gray.shape[1] / sw
@@ -328,15 +339,57 @@ class Perceiver:
                 for c in kept]
 
     # ---- player -----------------------------------------------------------------------
-    def _find_player(self, gray: np.ndarray, threshold: float) -> Optional[PointPx]:
+    def _find_player(self, gray: np.ndarray, small: Optional[np.ndarray] = None) -> Optional[PointPx]:
+        """Best name-tag match >= detection.player_threshold over the whole screen.
+
+        Coarse-to-fine for speed: score every position on the downscaled image, then
+        re-match at full resolution in a small window around the PLAYER_COARSE_PEAKS best
+        coarse peaks. The final score is always the full-resolution one.
+        """
         tp = self._player
         if tp is None or tp.h > gray.shape[0] or tp.w > gray.shape[1]:
             return None
-        res = cv2.matchTemplate(gray, tp.gray, cv2.TM_CCOEFF_NORMED)
-        np.nan_to_num(res, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-        _, best, _, (x, y) = cv2.minMaxLoc(res)
-        if best < threshold:
+        threshold = float(self.settings.detection.player_threshold)
+        scale = self._scale()
+        st = self._player_small
+        cands: List[Tuple[int, int]] = []
+        if (small is not None and st is not None and scale < 1.0
+                and st.shape[0] <= small.shape[0] and st.shape[1] <= small.shape[1]):
+            fx = gray.shape[1] / small.shape[1]
+            fy = gray.shape[0] / small.shape[0]
+            res = cv2.matchTemplate(small, st, cv2.TM_CCOEFF_NORMED)
+            np.nan_to_num(res, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+            for _ in range(PLAYER_COARSE_PEAKS):
+                _, v, _, (x, y) = cv2.minMaxLoc(res)
+                if v < threshold - PLAYER_COARSE_MARGIN:
+                    break
+                cands.append((int(round(x * fx)), int(round(y * fy))))
+                # suppress this peak before taking the next one
+                cv2.rectangle(res, (x - st.shape[1] // 2, y - st.shape[0] // 2),
+                              (x + st.shape[1] // 2, y + st.shape[0] // 2), -1.0, -1)
+            pad = int(np.ceil(2.0 / scale)) + 2
+        else:
+            cands = [(0, 0)]
+            pad = None   # full search
+
+        best, best_xy = -1.0, None
+        H_, W_ = gray.shape[:2]
+        for (x, y) in cands:
+            if pad is None:
+                x0, y0, x1, y1 = 0, 0, W_, H_
+            else:
+                x0, y0 = max(0, x - pad), max(0, y - pad)
+                x1, y1 = min(W_, x + tp.w + pad), min(H_, y + tp.h + pad)
+            roi = gray[y0:y1, x0:x1]
+            if roi.shape[0] < tp.h or roi.shape[1] < tp.w:
+                continue
+            res = cv2.matchTemplate(roi, tp.gray, cv2.TM_CCOEFF_NORMED)
+            np.nan_to_num(res, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+            _, v, _, (rx, ry) = cv2.minMaxLoc(res)
+            if v > best:
+                best, best_xy = v, (x0 + rx, y0 + ry)
+        if best_xy is None or best < threshold:
             return None
-        cx = x + tp.w // 2
-        cy = y + tp.h // 2 - PLAYER_TAG_TO_BODY_PX
+        cx = best_xy[0] + tp.w // 2
+        cy = best_xy[1] + tp.h // 2 - PLAYER_TAG_TO_BODY_PX
         return (int(cx), int(max(0, cy)))
