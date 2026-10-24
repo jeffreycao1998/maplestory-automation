@@ -7,7 +7,7 @@ dependencies = [
     "numpy",
     "opencv-python",
     "mss",
-    "pyyaml",
+    "pyyaml; python_version < '3.15'",
     "pillow",
     "pynput",
 ]

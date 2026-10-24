@@ -19,7 +19,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
-import yaml
+try:                      # PyYAML is optional: JSON is valid YAML, so files stay readable either way
+    import yaml
+except ImportError:       # e.g. no PyYAML wheel yet for a brand-new Python version
+    yaml = None
+import json
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -200,12 +204,26 @@ class Profile:
     def load(self) -> Settings:
         if self.settings_path.exists():
             with open(self.settings_path, "r", encoding="utf-8") as f:
-                return Settings.from_dict(yaml.safe_load(f))
+                return Settings.from_dict(load_yaml_or_json(f.read()))
         return Settings()
 
     def save(self, settings: Settings) -> None:
         self.ensure()
         tmp = self.settings_path.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
-            yaml.safe_dump(settings.to_dict(), f, sort_keys=False)
+            f.write(dump_yaml_or_json(settings.to_dict()))
         os.replace(tmp, self.settings_path)
+
+
+def load_yaml_or_json(text: str):
+    if not text.strip():
+        return None
+    if yaml is not None:
+        return yaml.safe_load(text)
+    return json.loads(text)
+
+
+def dump_yaml_or_json(data) -> str:
+    if yaml is not None:
+        return yaml.safe_dump(data, sort_keys=False)
+    return json.dumps(data, indent=2) + "\n"

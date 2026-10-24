@@ -23,7 +23,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-import yaml
 
 from maplebot.settings import Settings
 from maplebot.types import Action, Decision, Frame, Perception, Verdict, VerdictKind
@@ -106,7 +105,8 @@ class RunLogger:
 
         try:
             with open(run_dir / "settings.yaml", "w", encoding="utf-8") as f:
-                yaml.safe_dump(_jsonable(settings.to_dict()), f, sort_keys=False)
+                from ..settings import dump_yaml_or_json
+                f.write(dump_yaml_or_json(_jsonable(settings.to_dict())))
         except Exception:
             log.exception("Couldn't write settings snapshot")
 
