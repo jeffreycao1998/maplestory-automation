@@ -427,3 +427,133 @@ def test_every_sequence_ends_with_zero_held_after_release_all(settings, clock, s
         depth[k] = depth.get(k, 0) + (1 if d else -1)
         assert depth[k] in (0, 1)
     assert all(v == 0 for v in depth.values())
+
+
+# ---- inhibit / allow (pause & stop from another thread) -------------------------
+
+def test_inhibit_then_execute_produces_no_events(settings, clock):
+    c, b = make(settings, clock)
+    c.inhibit("paused by user")
+    assert c.inhibited
+    for a in Action:
+        ex(c, a)
+    assert b.events == [] and b.held == set()
+
+
+def test_inhibit_releases_held_walk(settings, clock):
+    c, b = make(settings, clock)
+    ex(c, Action.WALK_LEFT)
+    c.inhibit()
+    assert b.held == set() and c.walking is None
+    ex(c, Action.WALK_LEFT)                 # the in-flight tick from the bug report
+    assert b.held == set()
+    assert b.sequence() == [("left", DOWN), ("left", UP)]
+
+
+def test_allow_reenables(settings, clock):
+    c, b = make(settings, clock)
+    c.inhibit()
+    c.allow()
+    assert not c.inhibited
+    ex(c, Action.WALK_RIGHT)
+    assert b.held == {"right"}
+
+
+def test_inhibit_and_release_all_idempotent(settings, clock):
+    c, b = make(settings, clock)
+    ex(c, Action.WALK_RIGHT)
+    c.inhibit("a")
+    c.inhibit("b")
+    c.release_all()
+    c.release_all()
+    c.inhibit()
+    assert b.sequence() == [("right", DOWN), ("right", UP)]
+    assert c.inhibited and b.held == set()
+    c.allow()
+    c.allow()
+    assert not c.inhibited
+
+
+def test_inhibit_never_raises_when_backend_fails(settings, clock):
+    c, b = make(settings, clock, fail_up_on={"left"})
+    ex(c, Action.WALK_LEFT)
+    c.inhibit()                             # release fails: logged, not raised
+    assert c.inhibited
+    ex(c, Action.WALK_RIGHT)                # still blocked
+    assert ("right", DOWN) not in b.sequence()
+    b.fail_up_on.clear()
+    c.release_all()
+    assert b.held == set()
+
+
+def test_inhibit_from_other_thread_during_long_tap(settings):
+    """inhibit() during a mid-hold attack while walking: waits for the tap, then
+    nothing is held and no further key events happen."""
+    started = threading.Event()
+    go = threading.Event()
+
+    def slow_sleep(_s):
+        started.set()
+        go.wait(2)
+
+    b = FakeBackend()
+    c = Controller(settings, b, sleep=slow_sleep)
+    c.execute(Action.WALK_LEFT, 0.0)
+    c.execute(Action.STOP_WALK, 0.0)
+    c.execute(Action.WALK_LEFT, 0.0)
+    runner = threading.Thread(target=c.execute, args=(Action.JUMP, 0.0))
+    runner.start()
+    assert started.wait(2)                  # jump key is mid-hold
+    gui = threading.Thread(target=c.inhibit, args=("F11",))
+    gui.start()
+    gui.join(0.1)
+    assert gui.is_alive()                   # blocked until the tap finishes
+    go.set()
+    runner.join(2)
+    gui.join(2)
+    assert not runner.is_alive() and not gui.is_alive()
+    assert b.held == set() and c.inhibited
+    n = len(b.events)
+    for a in (Action.WALK_LEFT, Action.ATTACK, Action.JUMP, Action.FACE_RIGHT):
+        c.execute(a, 0.0)                   # ticks already in flight after F11
+    assert len(b.events) == n and b.held == set()
+    assert b.sequence()[-3:] == [("alt", DOWN), ("alt", UP), ("left", UP)]
+
+
+def test_inhibit_race_stress(settings):
+    """A runner hammering WALK while another thread inhibits: once inhibit()
+    returns, nothing is held and nothing is ever pressed again."""
+    b = FakeBackend()
+    c = Controller(settings, b, sleep=lambda s: None)
+    stop = threading.Event()
+    seq = [Action.WALK_LEFT, Action.WALK_RIGHT, Action.JUMP, Action.ATTACK]
+
+    def runner():
+        i = 0
+        while not stop.is_set():
+            c.execute(seq[i % len(seq)], 0.0)
+            i += 1
+
+    t = threading.Thread(target=runner)
+    t.start()
+    for _ in range(200):
+        c.inhibit()
+        n = len(b.events)
+        assert b.held == set()
+        threading.Event().wait(0.0005)
+        assert len(b.events) == n           # no presses while inhibited
+        c.allow()
+    c.inhibit()
+    stop.set()
+    t.join(2)
+    assert b.held == set()
+
+
+def test_close_inhibits(settings, clock, monkeypatch):
+    from maplebot.controls import controller as mod
+    monkeypatch.setattr(mod.atexit, "unregister", lambda f: None)
+    c, b = make(settings, clock)
+    ex(c, Action.WALK_LEFT)
+    c.close()
+    ex(c, Action.WALK_LEFT)
+    assert b.held == set() and c.inhibited

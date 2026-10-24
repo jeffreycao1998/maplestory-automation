@@ -50,6 +50,8 @@ class Calibration:
     mp_bar_box: Optional[List[int]] = None
     patrol_left: float = 0.30                 # minimap x fraction
     patrol_right: float = 0.70
+    patrol_y: Optional[float] = None          # minimap y of the training platform (set with the edges)
+    patrol_y_tolerance: float = 0.04          # further than this from patrol_y = fell off / wrong platform
     player_dot_hsv_low: List[int] = field(default_factory=lambda: [20, 150, 180])
     player_dot_hsv_high: List[int] = field(default_factory=lambda: [35, 255, 255])
 
@@ -88,6 +90,8 @@ class Safety:
     no_mobs_pause_s: float = 180.0     # no mobs seen this long -> pause
     stuck_jumps_limit: int = 6         # this many stuck-jumps within 60 s -> pause
     hp_critical: float = 0.15          # HP below this (after potions) -> stop
+    hp_unreadable_pause_s: float = 10.0  # HP bar unreadable this long -> pause (can't detect death)
+    platform_lost_s: float = 2.0       # off the training platform (minimap y) this long -> pause
     max_runtime_min: float = 120.0     # 0 = unlimited
     save_anomaly_frames: bool = True
 
@@ -130,8 +134,20 @@ class Settings:
             out.append("Minimap not calibrated")
         if not (0.0 <= self.calibration.patrol_left < self.calibration.patrol_right <= 1.0):
             out.append("Patrol left edge must be left of the right edge")
+        if not self.calibration.hp_bar_box:
+            out.append("HP bar not calibrated (needed so the bot stops before your character dies)")
         if not self.keys.attack:
             out.append("Attack key not set")
+        try:
+            from .supervisor.hotkeys import parse_key
+            for label, key in (("Pause", self.safety.pause_hotkey), ("Stop", self.safety.stop_hotkey)):
+                parse_key(key)
+            if parse_key(self.safety.pause_hotkey) == parse_key(self.safety.stop_hotkey):
+                out.append("Pause and Stop hotkeys must be different")
+        except ImportError:
+            pass
+        except ValueError as e:
+            out.append(f"Hotkey problem: {e}")
         try:
             from .controls import normalize_key
         except Exception:      # controls unavailable: skip key validation

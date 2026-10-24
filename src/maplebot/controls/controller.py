@@ -22,6 +22,10 @@ Safety guarantees
 - Released on ``__exit__``, ``close()`` and interpreter exit (atexit, weakref-safe).
 - One RLock serialises all key operations (runner thread executes, the GUI or hotkey
   thread may call release_all at any time).
+- ``inhibit()`` (pause/stop) sets a flag and releases everything under that lock;
+  ``execute()`` checks the flag inside the same lock acquisition that presses keys, so
+  a tick already in flight cannot re-press a key after pause/stop. ``allow()`` undoes it.
+  A tap that is mid-hold delays inhibit() by at most its hold time (~skill.hold_s).
 """
 from __future__ import annotations
 
@@ -102,6 +106,8 @@ class Controller:
         self.walking: Optional[str] = None
         self.last_action: Optional[Action] = None
         self.last_action_t: Optional[float] = None
+        self._inhibited = False
+        self._inhibit_reason = ""
         self._settings = settings
         self._binds = _resolve_keys(settings)
         self._atexit_cb = lambda ref=weakref.ref(self): _atexit_release(ref)
@@ -131,9 +137,44 @@ class Controller:
             self._settings = settings
             self._binds = binds
 
+    @property
+    def inhibited(self) -> bool:
+        """True while pause/stop is in effect: execute() presses nothing."""
+        return self._inhibited
+
+    def inhibit(self, reason: str = "") -> None:
+        """Block all further key presses and release everything held.
+
+        Safe to call from any thread (runner pause/stop, GUI, hotkeys). Once this
+        returns, no key is held and every later ``execute()`` is a no-op until
+        ``allow()``. If another thread is mid-tap, this waits on the lock until the tap
+        finishes: at most ``max(skill.hold_s, behavior.turn_tap_s, jump/potion tap)``,
+        i.e. about ``skill.hold_s`` (0.10 s by default). Idempotent; never raises.
+        """
+        with self._lock:
+            if not self._inhibited:
+                log.info("Key input inhibited%s", f": {reason}" if reason else "")
+            self._inhibited = True
+            self._inhibit_reason = reason
+            self.release_all()
+
+    def allow(self) -> None:
+        """Re-enable execute() after inhibit() (e.g. when the user resumes)."""
+        with self._lock:
+            self._inhibited = False
+            self._inhibit_reason = ""
+
     def execute(self, action: Action, now: float) -> None:
+        """Perform one Action. A no-op (zero key events) while inhibited.
+
+        The inhibited check and the key operations share one lock acquisition, so a
+        concurrent inhibit() either runs fully before (nothing is pressed) or waits
+        until this call returns and then releases what it left held (a walk key).
+        """
         action = Action(action)
         with self._lock:
+            if self._inhibited:
+                return
             before = set(self._held)
             try:
                 self._dispatch(action)
@@ -159,8 +200,8 @@ class Controller:
             log.exception("release_all failed unexpectedly")
 
     def close(self) -> None:
-        """Release everything and drop the atexit hook."""
-        self.release_all()
+        """Inhibit (release everything, block further presses) and drop the atexit hook."""
+        self.inhibit("controller closed")
         if not self._closed:
             self._closed = True
             try:

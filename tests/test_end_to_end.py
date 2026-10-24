@@ -120,5 +120,80 @@ def test_refuses_to_start_without_setup(tmp_path, monkeypatch):
         BotRunner(profile, Settings(), backend=FakeBackend(), use_hotkeys=False).run()
     s = Settings()
     s.calibration.minimap_box = [10, 10, 100, 60]
+    s.calibration.hp_bar_box = [10, 700, 100, 10]
     with pytest.raises(RunnerError, match="mob pictures"):
         BotRunner(profile, s, backend=FakeBackend(), use_hotkeys=False).run()
+
+
+# ---- regression tests for the code review -------------------------------------
+def test_inflight_tick_cannot_press_after_pause(world, monkeypatch):
+    """A decide() that is mid-flight when the user pauses must not press a key afterwards."""
+    from maplebot.behavior import Behavior
+    from maplebot.types import Action, Decision
+    seq, settings, profile = world
+    gate, entered = threading.Event(), threading.Event()
+
+    def slow_decide(self, p, now):
+        entered.set()
+        gate.wait(5)
+        return Decision(Action.WALK_LEFT, "PATROL", reason="test")
+    monkeypatch.setattr(Behavior, "decide", slow_decide)
+
+    r, backend, _ = _runner(seq, settings, profile, frames=None)
+    t = threading.Thread(target=r.run, daemon=True)
+    t.start()
+    assert entered.wait(5)
+    r.pause()                 # user hits F11 while decide() is running
+    n = len(backend.events)
+    gate.set()                # decide returns WALK_LEFT -> must be ignored
+    time.sleep(0.3)
+    assert backend.held == set()
+    assert len(backend.events) == n
+    r.stop()
+    t.join(5)
+
+
+def test_double_toggle_while_paused_ends_paused(world):
+    seq, settings, profile = world
+    r, backend, _ = _runner(seq, settings, profile, frames=None)
+    t = threading.Thread(target=r.run, daemon=True)
+    t.start()
+    time.sleep(0.3)
+    r.toggle_pause()          # pause
+    r.toggle_pause()          # resume
+    r.toggle_pause()          # pause again, immediately
+    time.sleep(0.4)
+    assert r.paused and r.status.paused
+    assert backend.held == set()
+    r.stop()
+    t.join(5)
+
+
+def test_setup_failure_cleans_up(world, monkeypatch, tmp_path):
+    seq, settings, profile = world
+    bad = tmp_path / "not-a-dir"
+    bad.write_text("x")
+    monkeypatch.setenv("MAPLEBOT_LOGS", str(bad / "logs"))
+    r, backend, statuses = _runner(seq, settings, profile, frames=10)
+    with pytest.raises(RunnerError, match="run logs"):
+        r.run()
+    assert statuses[-1].running is False
+    assert backend.held == set()
+
+
+def test_max_runtime_stops_in_replay(world):
+    seq, settings, profile = world
+    settings.safety.max_runtime_min = 0.1          # 6 s of sim time
+    settings.safety.no_mobs_pause_s = 1000
+    r, backend, statuses = _runner(seq, settings, profile, frames=300)   # 20 s at 15 fps
+    r.run()
+    assert "maximum run time" in statuses[-1].message
+    assert 5.5 <= r.status.runtime_s <= 7.0
+    assert backend.held == set()
+
+
+def test_bad_hotkey_is_a_setup_problem(world):
+    seq, settings, profile = world
+    settings.safety.stop_hotkey = settings.safety.pause_hotkey
+    with pytest.raises(RunnerError, match="different"):
+        BotRunner(profile, settings, backend=FakeBackend(), use_hotkeys=False).run()

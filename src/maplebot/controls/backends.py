@@ -191,6 +191,9 @@ KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_SCANCODE = 0x0008
 
+SENDINPUT_FAILED_MSG = ("Can't press keys in the game. Close the bot and start it with "
+                        "start.bat (it asks for administrator).")
+
 
 @functools.lru_cache(maxsize=None)
 def win32_structs():
@@ -243,8 +246,11 @@ def keyboard_flags(name: str, up: bool) -> Tuple[int, int]:
 class SendInputBackend:
     """Real keyboard input on Windows via user32.SendInput with scan codes.
 
-    If the game runs as administrator the bot must too: Windows silently drops input
-    from a non-elevated process into an elevated window (SendInput then returns 0).
+    If the game runs as administrator the bot must too (UIPI). Windows does NOT
+    report this reliably: SendInput may return 0 (we raise OSError), but it can also
+    return success while the game never sees the key -- a silent block. The launcher
+    self-elevates so this should not happen; the supervisor's "walking but not moving"
+    watchdog is the backstop for a silent block.
     """
 
     def __init__(self) -> None:
@@ -273,11 +279,9 @@ class SendInputBackend:
         sent = self._send(1, ctypes.byref(inp), ctypes.sizeof(self._INPUT))
         if sent != 1:
             err = ctypes.get_last_error()
-            raise OSError(
-                err,
-                f"Windows refused the key {'release' if up else 'press'} for {key!r} "
-                f"(SendInput error {err}). If MapleStory runs as administrator, run the "
-                f"bot as administrator too.")
+            raise OSError(err, SENDINPUT_FAILED_MSG
+                          + f" (SendInput error {err}, key {key!r} "
+                          + f"{'release' if up else 'press'})")
 
     def key_down(self, key: str) -> None:
         self._send_key(key, up=False)

@@ -3,7 +3,13 @@ The tick loop: capture -> perceive -> supervise -> decide -> act -> log.
 
 Owner: main agent. See docs/architecture.md.
 BotRunner.run() blocks; the app calls it from a worker thread and talks to it with
-pause() / resume() / stop(), which are safe to call from any thread.
+pause() / resume() / toggle_pause() / stop(), which are safe to call from any thread
+(GUI thread, hotkey listener thread).
+
+Key-safety model: pause() and stop() put the Controller into an *inhibited* state under
+its own lock. While inhibited, Controller.execute() presses nothing, so a tick that was
+already in flight when the user hit F11/F12 can't re-press a key. Only the worker thread
+lifts the inhibit, when it processes a resume.
 """
 from __future__ import annotations
 
@@ -16,7 +22,7 @@ import cv2
 import numpy as np
 
 from .settings import Profile, Settings
-from .types import Action, Decision, Flag, Frame, Perception, Status, Verdict, VerdictKind
+from .types import Action, Decision, Flag, Frame, Perception, Status, VerdictKind
 
 log = logging.getLogger(__name__)
 
@@ -48,36 +54,56 @@ class BotRunner:
         self._clock = clock
         self._sleep = sleep
 
+        self._lock = threading.RLock()       # guards the flags below, status and _controller
         self._stop = threading.Event()
-        self._paused = threading.Event()
-        self._resume_requested = threading.Event()
-        self._lock = threading.Lock()
+        self._paused = False                 # intended state (what the user / supervisor asked for)
+        self._resume_pending = False         # worker must reset behaviour/supervisor and un-inhibit
         self._controller = None
+        self._stop_reason = "Stopped by you"
+        self._hotkey_warning = ""
         self.status = Status()
         self.run_dir = None
-        self._stop_reason = "Stopped by you"
 
     # ---- control (any thread) -------------------------------------------
     def pause(self, reason: str = "Paused by you") -> None:
-        self._paused.set()
-        self._release_keys()
+        with self._lock:
+            self._paused = True
+            self._resume_pending = False
+            c = self._controller
+        if c is not None:
+            c.inhibit(reason)
         self._set_status(paused=True, message=reason)
 
     def resume(self) -> None:
-        if self._paused.is_set():
-            self._resume_requested.set()
+        with self._lock:
+            if not self._paused or self._stop.is_set():
+                return
+            self._paused = False
+            self._resume_pending = True
+        self._set_status(paused=False, message=self._running_message())
 
     def toggle_pause(self) -> None:
-        if self._paused.is_set():
+        with self._lock:
+            paused = self._paused
+        if paused:
             self.resume()
         else:
             self.pause()
 
     def stop(self, reason: str = "Stopped by you") -> None:
-        self._stop_reason = reason
+        with self._lock:
+            if not self._stop.is_set():
+                self._stop_reason = reason
+            self._stop.set()
+            c = self._controller
+        if c is not None:
+            c.inhibit(reason)
         self._set_status(message=reason)
-        self._stop.set()
-        self._release_keys()
+
+    @property
+    def paused(self) -> bool:
+        with self._lock:
+            return self._paused
 
     # ---- main loop (worker thread) ----------------------------------------
     def run(self) -> None:
@@ -100,179 +126,218 @@ class BotRunner:
             raise RunnerError(str(e)) from e
 
         enable_dpi_awareness()
-        self._set_status(running=True, paused=False, message="Starting…")
-
-        # Countdown so the user can click into the game.
-        end = self._clock() + max(0.0, s.safety.start_delay_s)
-        while not self._stop.is_set() and self._clock() < end:
-            self._set_status(message=f"Starting in {end - self._clock():.0f}… click into the game")
-            self._sleep(0.1)
-        if self._stop.is_set():
-            self._set_status(running=False)
-            return
+        self._set_status(running=True, paused=False, message="Starting…", hotkeys_ok=True)
 
         capture = self._capture
         own_capture = capture is None
-        if own_capture:
-            from .perception import ScreenCapture, WindowNotFound
-            try:
-                capture = ScreenCapture(s.calibration.window_title)
-            except WindowNotFound as e:
-                self._set_status(running=False, message=str(e))
-                raise RunnerError(str(e)) from e
-
-        backend = self._backend
-        if backend is None:
-            try:
-                backend = default_backend()
-            except RuntimeError as e:
-                raise RunnerError(str(e)) from e
-
-        perceiver = Perceiver(s, mob_templates, self.profile.player_template())
-        behavior = Behavior(s, map_model)
-        supervisor = Supervisor(s)
-        controller = Controller(s, backend)
-        with self._lock:
-            self._controller = controller
-        logger = RunLogger(self.profile.logs_dir, s)
-        self.run_dir = logger.run_dir
-
         hotkeys = None
-        if self._use_hotkeys:
-            try:
-                hotkeys = Hotkeys(s.safety.pause_hotkey, s.safety.stop_hotkey,
-                                  on_pause=self.toggle_pause, on_stop=self.stop)
-                hotkeys.start()
-            except HotkeysUnavailable as e:
-                hotkeys = None
-                log.warning("hotkeys unavailable: %s", e)
-                self._set_status(message=f"{e} Use the app's buttons to pause/stop.")
-
+        controller = None
+        logger = None
         ticks = 0
         attacks = 0
-        stop_reason = "Stopped by you"
-        t_start = self._clock()
-        last_preview = 0.0
-        fps = 0.0
-        period = 1.0 / max(1.0, s.behavior.loop_hz)
-        p: Optional[Perception] = None
+        t_start: Optional[float] = None
+        stop_reason = None
 
         try:
-            with controller:
-                supervisor.start(t_start)
-                self._set_status(message="Running")
-                while not self._stop.is_set():
-                    tick_t0 = self._clock()
+            # Hotkeys first, so F12 works during the countdown too.
+            if self._use_hotkeys:
+                try:
+                    hotkeys = Hotkeys(s.safety.pause_hotkey, s.safety.stop_hotkey,
+                                      on_pause=self.toggle_pause, on_stop=self.stop)
+                    hotkeys.start()
+                except (HotkeysUnavailable, ValueError) as e:
+                    hotkeys = None
+                    log.warning("hotkeys unavailable: %s", e)
+                    self._hotkey_warning = f"{s.safety.pause_hotkey.upper()}/{s.safety.stop_hotkey.upper()} " \
+                                           f"hotkeys aren't working ({e}) — use the app's Pause/Stop buttons."
+                    self._set_status(hotkeys_ok=False, message=self._hotkey_warning)
 
-                    if self._resume_requested.is_set():
-                        self._resume_requested.clear()
-                        self._paused.clear()
-                        behavior.reset()
-                        supervisor.reset(tick_t0)
-                        self._set_status(paused=False, message="Running")
+            # Countdown so the user can click into the game.
+            end = self._clock() + max(0.0, s.safety.start_delay_s)
+            while not self._stop.is_set() and self._clock() < end:
+                left = max(0.0, end - self._clock())
+                self._set_status(countdown_s=left,
+                                 message=f"Starting in {left:.0f}… click into the game")
+                self._sleep(0.1)
+            self._set_status(countdown_s=None)
+            if self._stop.is_set():
+                stop_reason = self._stop_reason
+                return
 
-                    if self._paused.is_set():
-                        controller.release_all()
-                        self._set_status(runtime_s=tick_t0 - t_start)
-                        self._sleep(0.1)
-                        continue
-
-                    frame = self._grab(capture)
-                    if frame is None:          # recording ended (replay / tests)
-                        stop_reason = "Recording ended"
-                        break
-                    now = frame.t if not own_capture else self._clock()
-
-                    p = perceiver.perceive(frame)
-                    verdict = supervisor.check(p, now)
-
-                    if verdict.kind is not VerdictKind.OK:
-                        controller.release_all()
-                        logger.log_tick(p, None, verdict)
-                        logger.save_frame(frame, verdict.kind.value)
-                        if verdict.kind is VerdictKind.STOP:
-                            stop_reason = verdict.reason
-                            break
-                        self.pause(verdict.reason)
-                        continue
-
-                    d = behavior.decide(p, now)
-                    controller.execute(d.action, now)
-                    supervisor.note_decision(d, now)
-                    logger.log_tick(p, d, verdict)
-                    if d.state == "STUCK" or Flag.LOW_CONFIDENCE in p.flags:
-                        logger.save_frame(frame, d.state.lower() if d.state == "STUCK" else "lowconf")
-                    if self._on_decision:
-                        self._on_decision(d)
-
-                    ticks += 1
-                    if d.action is Action.ATTACK:
-                        attacks += 1
-
-                    elapsed = self._clock() - tick_t0
-                    inst = 1.0 / max(elapsed, period, 1e-3)
-                    fps = inst if fps == 0 else fps * 0.9 + inst * 0.1
-                    self._set_status(state=d.state, action=d.action.value, n_mobs=len(p.mobs),
-                                     map_x=p.player_map[0] if p.player_map else None,
-                                     hp=p.hp, mp=p.mp, fps=fps, attacks=attacks,
-                                     runtime_s=now - t_start if not own_capture else self._clock() - t_start)
-
-                    if self._on_preview and (tick_t0 - last_preview) >= PREVIEW_INTERVAL_S:
-                        last_preview = tick_t0
-                        try:
-                            self._on_preview(annotate(frame, p, d, s))
-                        except Exception:       # preview must never kill the bot
-                            log.exception("preview failed")
-
-                    if own_capture:
-                        remaining = period - (self._clock() - tick_t0)
-                        if remaining > 0:
-                            self._sleep(remaining)
-                else:
-                    stop_reason = self._stop_reason
-        finally:
-            controller.release_all()
-            if hotkeys:
-                hotkeys.stop()
-            logger.close({"stop_reason": stop_reason, "ticks": ticks, "attacks": attacks,
-                          "runtime_s": round(self._clock() - t_start, 1)})
             if own_capture:
-                capture.close()
+                from .perception import ScreenCapture, WindowNotFound
+                try:
+                    capture = ScreenCapture(s.calibration.window_title)
+                except WindowNotFound as e:
+                    raise RunnerError(str(e)) from e
+
+            backend = self._backend
+            if backend is None:
+                try:
+                    backend = default_backend()
+                except RuntimeError as e:
+                    raise RunnerError(str(e)) from e
+
+            perceiver = Perceiver(s, mob_templates, self.profile.player_template())
+            behavior = Behavior(s, map_model)
+            supervisor = Supervisor(s)
+            controller = Controller(s, backend)
+            try:
+                logger = RunLogger(self.profile.logs_dir, s)
+            except OSError as e:
+                raise RunnerError(f"Can't write run logs to {self.profile.logs_dir}: {e}") from e
+            self.run_dir = logger.run_dir
+
+            with self._lock:
+                self._controller = controller
+                already_paused = self._paused
+                if self._stop.is_set():
+                    controller.inhibit(self._stop_reason)
+            if already_paused:          # user pressed pause during the countdown
+                controller.inhibit("Paused by you")
+
+            last_preview = 0.0
+            fps = 0.0
+            period = 1.0 / max(1.0, s.behavior.loop_hz)
+            self._set_status(message=self._running_message())
+
+            while not self._stop.is_set():
+                tick_t0 = self._clock()
+
+                with self._lock:
+                    resume_now = self._resume_pending
+                    self._resume_pending = False
+                    paused = self._paused
+                if resume_now and not paused:
+                    behavior.reset()
+                    supervisor.reset(tick_t0 if own_capture else (t_start or 0.0))
+                    controller.allow()
+
+                if paused:
+                    if t_start is not None and own_capture:
+                        self._set_status(runtime_s=tick_t0 - t_start)
+                    self._sleep(0.1)
+                    continue
+
+                frame = self._grab(capture)
+                if frame is None:          # recording ended (replay / tests)
+                    stop_reason = "Recording ended"
+                    break
+                # One time base for everything: wall clock live, frame time in replays.
+                now = self._clock() if own_capture else frame.t
+                if t_start is None:
+                    t_start = now
+                    supervisor.start(now)
+                elif resume_now and not own_capture:
+                    supervisor.reset(now)
+
+                p = perceiver.perceive(frame)
+                verdict = supervisor.check(p, now)
+
+                if verdict.kind is not VerdictKind.OK:
+                    controller.inhibit(verdict.reason)
+                    logger.log_tick(p, None, verdict)
+                    logger.save_frame(frame, verdict.kind.value)
+                    if verdict.kind is VerdictKind.STOP:
+                        stop_reason = verdict.reason
+                        break
+                    self.pause(verdict.reason)
+                    continue
+
+                d = behavior.decide(p, now)
+                controller.execute(d.action, now)   # no-op if pause/stop raced in
+                supervisor.note_decision(d, now)
+                logger.log_tick(p, d, verdict)
+                if d.state == "STUCK":
+                    logger.save_frame(frame, "stuck")
+                elif Flag.LOW_CONFIDENCE in p.flags:
+                    logger.save_frame(frame, "lowconf")
+                if self._on_decision:
+                    self._on_decision(d)
+
+                ticks += 1
+                if d.action is Action.ATTACK:
+                    attacks += 1
+
+                elapsed = self._clock() - tick_t0
+                inst = 1.0 / max(elapsed, period, 1e-3)
+                fps = inst if fps == 0 else fps * 0.9 + inst * 0.1
+                self._set_status(state=d.state, action=d.action.value, n_mobs=len(p.mobs),
+                                 map_x=p.player_map[0] if p.player_map else None,
+                                 hp=p.hp, mp=p.mp, fps=fps, attacks=attacks,
+                                 runtime_s=now - t_start)
+
+                if (self._on_preview and s.debug_preview
+                        and (tick_t0 - last_preview) >= PREVIEW_INTERVAL_S):
+                    last_preview = tick_t0
+                    try:
+                        self._on_preview(annotate(frame, p, d, s))
+                    except Exception:       # preview must never kill the bot
+                        log.exception("preview failed")
+
+                if own_capture:
+                    remaining = period - (self._clock() - tick_t0)
+                    if remaining > 0:
+                        self._sleep(remaining)
+
+            if stop_reason is None:
+                stop_reason = self._stop_reason
+        except BaseException as e:
+            if stop_reason is None:
+                stop_reason = str(e) if isinstance(e, RunnerError) else f"Stopped by an error: {e}"
+            raise
+        finally:
+            if controller is not None:
+                controller.inhibit("run ended")
+                controller.release_all()
+                try:
+                    controller.close()
+                except Exception:
+                    log.exception("controller close failed")
+            if hotkeys is not None:
+                hotkeys.stop()
+            if logger is not None:
+                runtime = 0.0
+                if t_start is not None:
+                    runtime = (self._clock() - t_start) if own_capture else max(0.0, self.status.runtime_s)
+                logger.close({"stop_reason": stop_reason, "ticks": ticks, "attacks": attacks,
+                              "runtime_s": round(runtime, 1)})
+            if own_capture and capture is not None:
+                try:
+                    capture.close()
+                except Exception:
+                    log.exception("capture close failed")
             with self._lock:
                 self._controller = None
-            self._set_status(running=False, paused=False, message=stop_reason)
+            self._set_status(running=False, paused=False, countdown_s=None,
+                             message=stop_reason or self._stop_reason)
 
     # ---- helpers ------------------------------------------------------------
+    def _running_message(self) -> str:
+        return "Running" + (f" — {self._hotkey_warning}" if self._hotkey_warning else "")
+
     def _grab(self, capture) -> Optional[Frame]:
         try:
             return capture.grab()
-        except StopIteration:
+        except StopIteration:        # FolderCapture/SequenceCapture EndOfRecording
             return None
-        except Exception as e:
-            if type(e).__name__ == "EndOfRecording":
-                return None
-            raise
-
-    def _release_keys(self) -> None:
-        with self._lock:
-            c = self._controller
-        if c is not None:
-            c.release_all()
 
     def _set_status(self, **changes) -> None:
-        for k, v in changes.items():
-            setattr(self.status, k, v)
+        with self._lock:
+            for k, v in changes.items():
+                setattr(self.status, k, v)
+            snapshot = Status(**vars(self.status))
         if self._on_status:
             try:
-                self._on_status(Status(**vars(self.status)))
+                self._on_status(snapshot)
             except Exception:
                 log.exception("status callback failed")
 
 
 # ---- preview drawing -----------------------------------------------------
 def annotate(frame: Frame, p: Perception, d: Optional[Decision], s: Settings) -> np.ndarray:
-    """What the bot sees: you + attack range (green), mobs (orange), target (red),
-    minimap box (cyan), patrol edges (magenta)."""
+    """What the bot sees: you + attack range (green; orange if your position is a guess),
+    mobs (orange), target (red), minimap box (cyan), patrol edges (magenta)."""
     img = frame.image.copy()
     if p.player_screen:
         px, py = p.player_screen
@@ -292,6 +357,10 @@ def annotate(frame: Frame, p: Perception, d: Optional[Decision], s: Settings) ->
         for frac in (s.calibration.patrol_left, s.calibration.patrol_right):
             lx = x + int(frac * w)
             cv2.line(img, (lx, y), (lx, y + h), (255, 0, 255), 1)
+        if s.calibration.patrol_y is not None:
+            ly = y + int(s.calibration.patrol_y * h)
+            cv2.line(img, (x + int(s.calibration.patrol_left * w), ly),
+                     (x + int(s.calibration.patrol_right * w), ly), (255, 0, 255), 1)
         if p.player_map:
             cv2.circle(img, (x + int(p.player_map[0] * w), y + int(p.player_map[1] * h)), 4, (0, 255, 0), 1)
     label = f"{d.state if d else '-'} | {d.action.value if d else '-'} | mobs {len(p.mobs)}"

@@ -103,3 +103,5 @@ class Status:
     message: str = ""                    # last pause/stop reason or error
     runtime_s: float = 0.0
     attacks: int = 0
+    countdown_s: Optional[float] = None  # seconds left before the bot starts acting, else None
+    hotkeys_ok: bool = True              # False if F11/F12 aren't working (use the app's buttons)

@@ -163,3 +163,9 @@ def test_input_struct_layout_matches_64bit_windows():
     i = INPUT(type=1)
     i.ki.wScan = 0x4B
     assert i.ki.wScan == 0x4B
+
+
+def test_sendinput_failure_message_is_user_friendly():
+    msg = be.SENDINPUT_FAILED_MSG
+    assert msg == ("Can't press keys in the game. Close the bot and start it with "
+                   "start.bat (it asks for administrator).")

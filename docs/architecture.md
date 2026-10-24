@@ -67,6 +67,10 @@ class Controller:
     def release_all(self) -> None              # idempotent, never raises
     facing: str                                # "left" | "right"
     walking: str | None
+    def inhibit(self, reason: str = "") -> None  # block all presses + release; used by pause/stop
+    def allow(self) -> None                    # lift the block (worker thread, on resume)
+    inhibited: bool
+    def close(self) -> None                    # inhibit + release + drop the atexit hook
     def __enter__ / __exit__                   # __exit__ releases all
 ```
 
@@ -86,7 +90,12 @@ class Behavior:
     def reset(self) -> None                    # called on resume after pause
     def update_settings(self, settings: Settings) -> None
 ```
-States (v1): `PATROL`, `ENGAGE`, `RECOVER`, `STUCK`, `WAIT` (no usable perception).
+States (v1): `PATROL`, `ENGAGE`, `RECOVER`, `STUCK`, `WAIT` (no usable perception),
+`OFF_PLATFORM` (minimap y far from `calibration.patrol_y`; supervisor pauses after
+`safety.platform_lost_s`).
+
+Time base: the runner passes wall-clock time live, and `Frame.t` in replays, to
+supervisor and behavior alike.
 
 ### supervisor (`safety-supervisor`)
 ```python
@@ -128,18 +137,22 @@ class BotRunner:
                  backend: InputBackend | None = None,
                  capture: "ScreenCapture | None" = None,
                  on_status: Callable[[Status], None] | None = None,
-                 on_preview: Callable[[np.ndarray], None] | None = None)
-    def run(self) -> None        # blocking; call from a worker thread
-    def pause(self, reason: str = "paused by user") -> None
-    def resume(self) -> None
-    def stop(self, reason: str = "stopped by user") -> None
-    status: Status
+                 on_preview: Callable[[np.ndarray], None] | None = None,
+                 on_decision: Callable[[Decision], None] | None = None,   # replay/tests
+                 use_hotkeys: bool = True,
+                 clock=time.monotonic, sleep=time.sleep)
+    def run(self) -> None        # blocking; call from a worker thread; raises RunnerError (friendly)
+    def pause(self, reason: str = "Paused by you") -> None     # any thread; inhibits the controller
+    def resume(self) -> None                                  # any thread; worker resets + allows
+    def toggle_pause(self) -> None
+    def stop(self, reason: str = "Stopped by you") -> None
+    paused: bool; status: Status; run_dir: Path | None
 ```
 `on_preview` receives an annotated BGR image (boxes, range, patrol lines) ~5×/second.
 
 ## TickLog (`logs/<run>/ticks.jsonl`)
-`t, state, action, reason, verdict, player_map, player_screen, n_mobs, target, hp, mp,
-flags, confidence` — anomalies (verdict ≠ OK, STUCK, low confidence) also save
+`t, state, action, reason, verdict, (verdict_reason when not OK), player_map, player_screen,
+n_mobs, target, hp, mp, flags, confidence` — anomalies (verdict ≠ OK, STUCK, low confidence) also save
 `logs/<run>/frames/<t>_<tag>.png`. `summary.json` at the end.
 
 ## Platform notes
