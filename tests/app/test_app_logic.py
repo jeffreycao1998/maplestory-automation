@@ -352,7 +352,7 @@ def test_wizard_steps_shape():
     keys = [s.key for s in L.WIZARD_STEPS]
     assert keys == ["window", "screenshot", "minimap", "dot", "mobs", "player", "bars",
                     "patrol", "keys", "summary"]
-    assert {s.key for s in L.WIZARD_STEPS if s.optional} == {"player", "bars"}
+    assert {s.key for s in L.WIZARD_STEPS if s.optional} == {"player"}   # HP bar is required
     for s in L.WIZARD_STEPS:
         assert 10 < len(s.instruction) < 320
     assert L.step_label(0) == "Step 1 of 10: Game window"
@@ -393,7 +393,12 @@ def test_step_dot_and_mobs():
 
 def test_step_bars():
     c = ctx(screenshot_size=(1366, 768))
-    assert L.step_problem("bars", c) is None                        # optional
+    assert "required" in L.step_problem("bars", c)                  # HP bar is required
+    c.settings.calibration.mp_bar_box = [612, 751, 103, 14]
+    assert "HP bar" in L.step_problem("bars", c)                    # MP alone isn't enough
+    c.settings.calibration.mp_bar_box = None
+    c.settings.calibration.hp_bar_box = [504, 751, 103, 14]
+    assert L.step_problem("bars", c) is None                        # MP stays optional
     c.settings.calibration.hp_bar_box = [500, 600, 20, 60]          # tall, not a bar
     assert "wide and short" in L.step_problem("bars", c)
     c.settings.calibration.hp_bar_box = [500, 740, 140, 12]
@@ -440,6 +445,8 @@ def test_step_summary():
     c = ctx(n_mob_templates=1)
     assert "Minimap" in L.step_problem("summary", c)
     c.settings.calibration.minimap_box = [8, 30, 160, 120]
+    assert "HP bar" in L.step_problem("summary", c)
+    c.settings.calibration.hp_bar_box = [504, 751, 103, 14]
     assert L.step_problem("summary", c) is None
     c.n_mob_templates = 0
     assert "mob pictures" in L.step_problem("summary", c)
@@ -492,6 +499,10 @@ def test_friendly_error_never_traceback():
     assert "buttons" in m
     t, m = L.friendly_error(PermissionError("denied"))
     assert "start.bat" in m
+    t, m = L.friendly_error(OSError(5, "SendInput failed: access denied"))
+    assert t == "Can't press keys" and "administrator" in m and "start.bat" in m
+    t, m = L.friendly_error(FileNotFoundError("mob_1.png"))
+    assert t == "File missing"                                      # not the key-press dialog
     t, m = L.friendly_error(ZeroDivisionError("division by zero"))
     assert "Traceback" not in m and "logs" in m
 
@@ -557,3 +568,89 @@ def test_wizard_dot_click_on_real_frame(click, ok):
         assert pos == pytest.approx((0.506, 0.446), abs=0.02)   # labelled player_map
     else:
         assert lo is None
+
+
+# ---------------------------------------------------------------- review follow-ups
+
+def test_patrol_y_fields_in_form_with_tooltips():
+    specs = {sp.key: sp for sp in L.iter_fields()}
+    for k in (("calibration", "patrol_y"), ("calibration", "patrol_y_tolerance")):
+        assert specs[k].tooltip
+    assert specs[("calibration", "patrol_y")].kind == "optional_float"
+    sp = specs[("calibration", "patrol_y")]
+    assert L.parse_value(sp, "") is None
+    assert L.parse_value(sp, "0.45") == pytest.approx(0.45)
+    with pytest.raises(L.FieldError):
+        L.parse_value(sp, "1.5")
+    with pytest.raises(L.FieldError):
+        L.parse_value(specs[("calibration", "patrol_y_tolerance")], "0")
+
+
+def test_combine_patrol_y():
+    assert L.combine_patrol_y(0.40, 0.44) == pytest.approx(0.42)
+    assert L.combine_patrol_y(0.40, None) == pytest.approx(0.40)
+    assert L.combine_patrol_y(None, None, existing=0.3) == 0.3
+    assert L.combine_patrol_y(None, None) is None
+
+
+def test_patrol_y_warning_different_bridges():
+    assert L.patrol_y_warning(0.44, 0.46, 0.04) is None
+    w = L.patrol_y_warning(0.20, 0.45, 0.04)
+    assert w and "different bridges" in w
+    assert L.patrol_y_warning(0.45, None, 0.04) is None                 # nothing to compare yet
+    assert "different bridges" in L.patrol_y_warning(0.70, None, 0.04, existing=0.45)
+    assert L.patrol_y_warning(None, None, 0.04, existing=0.45) is None
+
+
+def test_patrol_instruction_mentions_one_bridge():
+    st = L.WIZARD_STEPS[L.step_index("patrol")]
+    assert "same bridge" in st.instruction and "in from its ends" in st.instruction
+
+
+def test_summary_mentions_hp_required_and_patrol_y():
+    c = ctx()
+    c.settings.calibration.patrol_y = 0.446
+    text = "\n".join(L.summary_lines(c, player_template=False))
+    assert "required" in text and "recommended for magicians" in text and "0.45" in text
+
+
+def test_countdown_text_uses_countdown_s():
+    St = SimpleNamespace
+    assert L.countdown_text(St(running=True, countdown_s=2.4, message="")) == \
+        "Starting in 3... click into the game"
+    assert L.countdown_text(St(running=True, countdown_s=0.0, message="Starting in 1")) == ""
+    assert L.countdown_text(St(running=False, countdown_s=2.0, message="")) == ""
+    # countdown_s None -> no countdown even if a message happens to start that way
+    assert L.countdown_text(St(running=True, countdown_s=None, message="Running")) == ""
+    # older runner without the field: falls back to the message
+    assert L.countdown_text(St(running=True, message="Starting in 2… click")) == "Starting in 2… click"
+    assert L.countdown_text(Status(running=True)) == ""
+
+
+def test_status_message_shown_verbatim():
+    msg = "Hotkeys unavailable: run as admin. Use the app's buttons to pause/stop."
+    assert L.format_status(Status(running=True, message=msg))["message"] == msg
+
+
+def test_pid_file_written_and_removed(tmp_path):
+    code = ("import sys, pathlib; sys.modules['tkinter'] = None\n"
+            "from maplebot.app.gui import write_pid_file\n"
+            "p = write_pid_file(pathlib.Path(sys.argv[1]))\n"
+            "import os; assert p.read_text().strip() == str(os.getpid())\n"
+            "print('written')\n")
+    root = __import__("pathlib").Path(__file__).resolve().parents[2] / "src"
+    r = subprocess.run([sys.executable, "-c", code, str(tmp_path)], capture_output=True, text=True,
+                       env={**__import__("os").environ, "PYTHONPATH": str(root)})
+    assert r.returncode == 0 and "written" in r.stdout, r.stderr
+    assert not (tmp_path / "app.pid").exists()                 # removed at exit
+
+
+def test_start_bat_robust_quoting():
+    bat = (__import__("pathlib").Path(__file__).resolve().parents[2] / "start.bat").read_bytes()
+    assert b"\r\n" in bat and b"\n" not in bat.replace(b"\r\n", b"")   # CRLF only
+    text = bat.decode("ascii")
+    assert "$env:MAPLEBOT_SELF" in text and "'%~f0'" not in text       # path not in PS source
+    assert "app.pid" in text and 'imagename eq pythonw.exe' not in text
+    # no parenthesised blocks that a ')' in the folder path could break
+    import re
+    assert not re.search(r"^\s*if [^\r\n]*\($", text, re.M)
