@@ -9,5 +9,8 @@ venv/
 data/recordings/
 logs/
 
+# the user's own setup (settings + templates)
+profile/
+
 # local overrides
 configs/local*.yaml

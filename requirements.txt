@@ -1,0 +1,8 @@
+numpy
+opencv-python
+mss
+pyyaml
+pillow
+pydirectinput; sys_platform == "win32"
+pynput
+pytest

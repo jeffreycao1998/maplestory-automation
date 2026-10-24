@@ -1,0 +1,28 @@
+[project]
+name = "maplebot"
+version = "0.1.0"
+description = "Screen-reading training automation for MapleStory Classic"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "opencv-python",
+    "mss",
+    "pyyaml",
+    "pillow",
+    "pydirectinput; sys_platform == 'win32'",
+    "pynput",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]

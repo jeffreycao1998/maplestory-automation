@@ -27,6 +27,8 @@ system and only edit files inside their area.
 | Input / actions | `controls-engineer` | `src/maplebot/controls/` |
 | Watchdogs, kill switch, run logging | `safety-supervisor` | `src/maplebot/supervisor/` |
 | Recorder, replay, datasets, metrics, tests | `test-harness-engineer` | `tools/`, `tests/`, `src/maplebot/replay/` |
+| Launcher, setup wizard, control window | `app-engineer` | `src/maplebot/app/`, `start.bat`, `docs/user-guide.md` |
+| Tick loop, shared types/settings, integration | main agent | `src/maplebot/runner.py`, `types.py`, `settings.py` |
 | Post-run log analysis (read-only) | `run-analyst` | writes only `reports/` |
 | Pre-merge review (read-only) | `code-reviewer` | nothing |
 
