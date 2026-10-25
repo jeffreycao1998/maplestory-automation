@@ -188,7 +188,7 @@ class BotRunner:
                     raise RunnerError(str(e)) from e
 
             perceiver = Perceiver(s, mob_templates, self.profile.player_template(), self.profile.item_templates(),
-                                  self.profile.alert_templates())
+                                  self.profile.alert_templates(), map_reference=self.profile.map_reference_descriptor(s))
             behavior = Behavior(s, map_model)
             supervisor = Supervisor(s)
             controller = Controller(s, backend,
@@ -412,34 +412,38 @@ def annotate(frame: Frame, p: Perception, d: Optional[Decision], s: Settings) ->
                       (item.x + item.w // 2, item.y + item.h // 2), (0, 255, 255), 2)
     mm = s.calibration.minimap_box
     if mm:
+        from .perception.map_reference import map_to_image
         x, y, w, h = mm
         cv2.rectangle(img, (x, y), (x + w, y + h), (255, 255, 0), 1)
-        for frac in (s.calibration.patrol_left, s.calibration.patrol_right):
-            lx = x + int(frac * w)
-            cv2.line(img, (lx, y), (lx, y + h), (255, 0, 255), 1)
-        if s.calibration.patrol_y is not None:
-            ly = y + int(s.calibration.patrol_y * h)
-            cv2.line(img, (x + int(s.calibration.patrol_left * w), ly),
-                     (x + int(s.calibration.patrol_right * w), ly), (255, 0, 255), 1)
-        if d is not None and d.route:
-            from .mapmodel import MapModel
-            model = MapModel.from_settings(s)
-            for edge in model.connections:
-                if edge.name in d.route:
-                    a = (x+int(edge.launch_x*w), y+int(model.by_name(edge.source).height_at(edge.launch_x)*h))
-                    b = (x+int(edge.land_x*w), y+int(model.by_name(edge.target).height_at(edge.land_x)*h))
-                    cv2.arrowedLine(img,a,b,(0,180,255),1,tipLength=.2)
-        for ladder in s.calibration.ladders:
-            lx = x+int(ladder["x"]*w)
-            cv2.line(img,(lx,y+int(ladder["top"]*h)),(lx,y+int(ladder["bottom"]*h)),(255,255,150),2)
-        if s.calibration.safe_spot is not None:
-            sx, sy = s.calibration.safe_spot
-            cv2.drawMarker(img, (x+int(sx*w), y+int(sy*h)), (255,255,255), cv2.MARKER_CROSS, 12, 2)
-        for platform in s.calibration.platforms:
-            points = np.array([(x+int(px*w), y+int(py*h)) for px, py in platform["points"]], np.int32)
-            cv2.polylines(img, [points], False, (255, 200, 0), 1)
-        if p.player_map:
-            cv2.circle(img, (x + int(p.player_map[0] * w), y + int(p.player_map[1] * h)), 4, (0, 255, 0), 1)
+        # Draw in the minimap ROI so offscreen world geometry cannot cover the game.
+        if 0 <= x < img.shape[1] and 0 <= y < img.shape[0] and w > 0 and h > 0:
+            roi = img[y:y+h, x:x+w]
+            def point(pos):
+                return map_to_image((0,0,w,h), pos, p.minimap_view)
+            if not s.calibration.map_reference or p.minimap_view is not None:
+                for frac in (s.calibration.patrol_left, s.calibration.patrol_right):
+                    lx = point((frac,0))[0]
+                    cv2.line(roi,(lx,0),(lx,h),(255,0,255),1)
+                if s.calibration.patrol_y is not None:
+                    cv2.line(roi,point((s.calibration.patrol_left,s.calibration.patrol_y)),
+                             point((s.calibration.patrol_right,s.calibration.patrol_y)),(255,0,255),1)
+                if d is not None and d.route:
+                    from .mapmodel import MapModel
+                    model = MapModel.from_settings(s)
+                    for edge in model.connections:
+                        if edge.name in d.route:
+                            a = point((edge.launch_x,model.by_name(edge.source).height_at(edge.launch_x)))
+                            b = point((edge.land_x,model.by_name(edge.target).height_at(edge.land_x)))
+                            cv2.arrowedLine(roi,a,b,(0,180,255),1,tipLength=.2)
+                for ladder in s.calibration.ladders:
+                    cv2.line(roi,point((ladder['x'],ladder['top'])),point((ladder['x'],ladder['bottom'])),(255,255,150),2)
+                if s.calibration.safe_spot is not None:
+                    cv2.drawMarker(roi,point(s.calibration.safe_spot),(255,255,255),cv2.MARKER_CROSS,12,2)
+                for platform in s.calibration.platforms:
+                    points=np.array([point(v) for v in platform['points']],np.int32)
+                    cv2.polylines(roi,[points],False,(255,200,0),1)
+                if p.player_map:
+                    cv2.circle(roi,point(p.player_map),4,(0,255,0),1)
     label = f"{d.state if d else '-'} | {d.action.value if d else '-'} | mobs {len(p.mobs)}"
     if d and d.reason:
         label += f" | {d.reason}"

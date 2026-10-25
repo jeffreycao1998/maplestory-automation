@@ -466,6 +466,14 @@ class Behavior:
             pl = self.map.platform_at(*p.player_map)
             if pl is not None:
                 left, right = pl.left, pl.right
+                # Selected limits apply on the training destination. Intermediate
+                # route platforms retain their own bounds while travelling.
+                if ((self.map.route and pl.name == self.map.route[-1]) or
+                        (not self.map.route and self.map.patrol_y is not None and
+                         pl.contains((left+right)/2, self.map.patrol_y))):
+                    lo, hi = max(left,self.map.patrol_left), min(right,self.map.patrol_right)
+                    if lo < hi:
+                        left, right = lo, hi
         margin = self.settings.behavior.edge_margin
         if self._player_xy(p) is not None and any(abs(m.x - p.player_screen[0]) < 100
                                                   for m in self._same_row(p)):

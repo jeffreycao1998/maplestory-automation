@@ -506,6 +506,7 @@ def settings_for_scene(truth: dict, base: Optional[Settings] = None) -> Settings
     """Settings whose calibration matches a synthetic scene (minimap, HP/MP boxes, patrol)."""
     s = Settings.from_dict(base.to_dict()) if base is not None else Settings()
     c = s.calibration
+    c.map_reference = None  # Synthetic minimaps use viewport coordinates.
     if truth.get("minimap_box") is not None:
         c.minimap_box = [int(v) for v in truth["minimap_box"]]
     if truth.get("hp_bar_box") is not None:

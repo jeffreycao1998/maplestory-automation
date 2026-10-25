@@ -187,13 +187,21 @@ def score_frame(truth: dict, p, ms: float, mob_eval: bool, totals: Totals,
                                         for j, m in enumerate(p.mobs) if j in fp]))
 
     tm = truth.get("player_map")
+    predicted_map=p.player_map
+    # Historical labels use visible-viewport fractions. Keep their metric basis
+    # explicit when the running detector uses registered full-map coordinates.
+    view=getattr(p,'minimap_view',None)
+    box=truth.get('minimap_box')
+    if predicted_map is not None and view is not None and box and not truth.get('map_reference'):
+        dx,dy,bx,by=view
+        predicted_map=((dx+predicted_map[0]*bx)/box[2],(dy+predicted_map[1]*by)/box[3])
     if tm is not None:
         totals.minimap_labelled += 1
         row.update(truth_map_x=tm[0], truth_map_y=tm[1])
     if p.player_map is not None:
-        row.update(pred_map_x=round(p.player_map[0], 5), pred_map_y=round(p.player_map[1], 5))
+        row.update(pred_map_x=round(predicted_map[0], 5), pred_map_y=round(predicted_map[1], 5))
     if tm is not None and p.player_map is not None:
-        ex, ey = abs(p.player_map[0] - tm[0]), abs(p.player_map[1] - tm[1])
+        ex, ey = abs(predicted_map[0] - tm[0]), abs(predicted_map[1] - tm[1])
         totals.map_x.append(ex)
         totals.map_y.append(ey)
         row.update(map_x_err_pct=round(100 * ex, 3), map_y_err_pct=round(100 * ey, 3))
@@ -374,7 +382,7 @@ def eval_labelled(root: Path, profile, templates: Optional[Path], crop: bool,
                 continue
             s = _settings_for_label(base, lf.label, use_label_boxes)
             if perceiver is None:
-                perceiver = Perceiver(s, mob_t, pt)
+                perceiver = Perceiver(s, mob_t, pt, map_reference=profile.map_reference_descriptor(s))
             else:
                 perceiver.update_settings(s)
             frame = Frame(image=img, t=0.0, window=(0, 0, img.shape[1], img.shape[0]))

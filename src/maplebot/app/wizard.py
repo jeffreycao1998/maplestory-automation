@@ -49,6 +49,14 @@ class SetupWizard(tk.Toplevel):
         self.steps = logic.setup_steps(include_supplies=settings.ocr.enabled)
         self._auto_regions_owned = {}
         self.ui_detection = None
+        self._map_tracker = None
+        try:
+            descriptor=profile.map_reference_descriptor(self.ctx.settings)
+            if descriptor:
+                from maplebot.perception.map_reference import MapReference
+                self._map_tracker=MapReference.from_descriptor(descriptor)
+        except (ValueError,OSError,KeyError):
+            log.exception('Saved map reference unavailable; alignment must be restored')
         # A map that was set up before keeps its patrol edges unless the user changes them
         # (per map: profile paths always point at the current map).
         map_set_up = _safe(profile.map_is_set_up, False)
@@ -179,7 +187,7 @@ class SetupWizard(tk.Toplevel):
         if self.key() == "summary":
             self.save()
             return
-        if self.key() == "patrol":
+        if self.key() == "patrol" and not self.s.calibration.platforms:
             c = self.s.calibration
             warn = logic.patrol_y_warning(self.ctx.patrol_left_y, self.ctx.patrol_right_y,
                                           logic.tolerance_above(c))
@@ -328,6 +336,7 @@ class SetupWizard(tk.Toplevel):
         self.image = image
         self.ui_detection = detect_screen(self.ctx, image, self._auto_regions_owned)
         self._auto_regions_owned = self.ui_detection.owned
+        self._registered_player(image)
         self.session_boxes = []
         self._sprite_boxes = []             # matches belonged to the previous screenshot
         if self.ui_detection.resized:
@@ -396,7 +405,7 @@ class SetupWizard(tk.Toplevel):
         extra = []
         if self.ctx.dot_pos is not None and self.s.calibration.minimap_box:
             extra.append(("dot", logic.minimap_dot_to_image(self.s.calibration.minimap_box,
-                                                           self.ctx.dot_pos), GREEN))
+                                                           self.ctx.dot_pos, self.ctx.minimap_view), GREEN))
         self.canvas.overlays = self._overlays(extra)
         self.canvas.show(self.image)
         if self.image is None:
@@ -558,17 +567,11 @@ class SetupWizard(tk.Toplevel):
         self.ctx.dot_pos = None
         if self.image is None or not c.minimap_box:
             return
-        try:
-            if self.key() == "screen":
-                from .setup_detection import unique_player_dot
-                self.ctx.dot_pos = unique_player_dot(self.image, c.minimap_box,
-                                                     c.player_dot_hsv_low, c.player_dot_hsv_high)
-                return
-            from maplebot.perception.calib import minimap_player_position
-            self.ctx.dot_pos = minimap_player_position(self.image, c.minimap_box,
-                                                       c.player_dot_hsv_low, c.player_dot_hsv_high)
-        except Exception:
-            log.exception("minimap_player_position failed")
+        self._registered_player(self.image)
+
+    def _registered_player(self,image):
+        from .setup_detection import registered_player
+        return registered_player(self.ctx,image,self._map_tracker)
 
     def _build_dot(self, f):
         if not self._need_screenshot(f):
@@ -600,7 +603,7 @@ class SetupWizard(tk.Toplevel):
             return
         extra = []
         if self.ctx.dot_pos is not None:
-            extra.append(("dot", logic.minimap_dot_to_image(self.s.calibration.minimap_box, self.ctx.dot_pos),
+            extra.append(("dot", logic.minimap_dot_to_image(self.s.calibration.minimap_box, self.ctx.dot_pos, self.ctx.minimap_view),
                           GREEN))
         self.canvas.overlays = [("box", tuple(self.s.calibration.minimap_box), CYAN, "")] + extra
         self.canvas.show(self.image, region=self._dot_region(), zoom=True)
@@ -627,6 +630,8 @@ class SetupWizard(tk.Toplevel):
         if lo is not None:
             c.player_dot_hsv_low, c.player_dot_hsv_high = list(lo), list(hi)
             self.ctx.dot_pos = pos
+            if c.map_reference:
+                self._refresh_dot()
             self.info(f"Found you at {pos[0]:.2f} across the minimap (green circle). "
                       "If the circle is on your yellow dot, click Next; otherwise click your dot again.")
         else:
@@ -910,18 +915,23 @@ class SetupWizard(tk.Toplevel):
     def _build_patrol(self, f):
         c = self.s.calibration
         if not c.minimap_box:
-            ttk.Label(f, text="Set the minimap box first (step 3).").pack(pady=20)
+            ttk.Label(f, text="Detect the minimap on Game and HUD first.").pack(pady=20)
             return
+        actions = ttk.Frame(f)
+        actions.pack(fill="x", pady=4)
+        ttk.Button(actions, text="Draw training limits", command=self._draw_patrol).pack(side="left")
+        ttk.Button(actions, text="Refresh minimap", command=self._refresh_patrol).pack(side="left", padx=6)
+        ttk.Button(actions, text="Map and spawn zones…", command=self._map_zones).pack(side="left")
         grid = ttk.Frame(f)
         grid.pack(anchor="w", pady=6)
         self.left_var = tk.StringVar(value=_frac(self.ctx.patrol_left_set if self.ctx.patrol_left_set is not None else c.patrol_left))
         self.right_var = tk.StringVar(value=_frac(self.ctx.patrol_right_set if self.ctx.patrol_right_set is not None else c.patrol_right))
-        ttk.Button(grid, text="Set left", width=12, command=lambda: self._set_edge("left")).grid(row=0, column=0, pady=3)
+        ttk.Button(grid, text="Use my left position", command=lambda: self._set_edge("left")).grid(row=0, column=0, pady=3)
         ttk.Label(grid, text="Left end:").grid(row=0, column=1, padx=(12, 4))
         le = ttk.Spinbox(grid, from_=0.0, to=1.0, increment=0.01, width=6, textvariable=self.left_var,
                          command=self._edges_typed)
         le.grid(row=0, column=2)
-        ttk.Button(grid, text="Set right", width=12, command=lambda: self._set_edge("right")).grid(row=1, column=0, pady=3)
+        ttk.Button(grid, text="Use my right position", command=lambda: self._set_edge("right")).grid(row=1, column=0, pady=3)
         ttk.Label(grid, text="Right end:").grid(row=1, column=1, padx=(12, 4))
         re_ = ttk.Spinbox(grid, from_=0.0, to=1.0, increment=0.01, width=6, textvariable=self.right_var,
                           command=self._edges_typed)
@@ -931,17 +941,65 @@ class SetupWizard(tk.Toplevel):
             Tooltip(w, "Position across the minimap: 0 = far left, 1 = far right. "
                        "You can nudge it here; move the ends inward a little if the bot walks off a ledge.")
         ttk.Label(f, foreground="#555555", wraplength=self.canvas_w, justify="left",
-                  text="Pick one bridge, set both edges on that same bridge, a little in from its "
-                       "ends (stop a few steps before ledges and walls). The pink lines below show "
-                       "the training area on the minimap.").pack(anchor="w", pady=6)
+                  text="Drag between two limits on your current platform, including your green dot. "
+                       "Keep the limits in from ledges. Pink lines show where the bot turns around; "
+                       "drawing a span does not teach it how to reach another platform.").pack(anchor="w", pady=6)
         self.canvas = ImageCanvas(f, self.canvas_w, max(160, self.canvas_h - 160))
         self.canvas.pack()
+        self.canvas.mode = "line"
+        self.canvas.on_line = self._got_patrol_segment
         self._redraw_patrol()
         row = ttk.Frame(f)
         row.pack(anchor="w", pady=4)
         ttk.Button(row, text="Choose safe spot", command=self._choose_safe_spot).pack(side="left")
         ttk.Button(row, text="Clear safe spot", command=self._clear_safe_spot).pack(side="left", padx=8)
         ttk.Label(row, text="Pick a known platform away from mobs and ledges.").pack(side="left")
+
+    def _map_zones(self):
+        from .map_zones import MapZones
+        def applied(tracker):
+            self._map_tracker=tracker
+            self.left_var.set(_frac(self.s.calibration.patrol_left))
+            self.right_var.set(_frac(self.s.calibration.patrol_right))
+            self._redraw_patrol()
+            self.info('Map coordinates aligned. Review the selected platform in Observe before starting.')
+        image=self.patrol_image if self.patrol_image is not None else self.image
+        try:
+            MapZones(self,self.profile,self.ctx,image,applied)
+        except (ValueError,OSError,KeyError) as exc:
+            self.error(str(exc))
+
+    def _draw_patrol(self):
+        self.canvas.mode = "line"
+        self.info("Drag between the left and right limits on the platform you are standing on.")
+
+    def _refresh_patrol(self):
+        def got(image):
+            self._set_main_image(image)
+            self.patrol_image = image
+            self._redraw_patrol()
+        self.take_screenshot(got)
+
+    def _got_patrol_segment(self, start, end):
+        image = self.patrol_image if self.patrol_image is not None else self.image
+        c = self.s.calibration
+        pos = self._registered_player(image)
+        try:
+            logic.select_patrol_segment(self.ctx, start, end, pos)
+        except ValueError as exc:
+            self.error(str(exc))
+            return
+        self.left_var.set(_frac(c.patrol_left))
+        self.right_var.set(_frac(c.patrol_right))
+        self._redraw_patrol()
+        text = "Training limits drawn. Pink lines show the turn-around points; click Next."
+        if c.safe_spot is not None:
+            from maplebot.mapmodel import MapModel
+            try:
+                MapModel.from_settings(self.s).safe_platform(c.safe_spot, self.s.behavior.edge_margin)
+            except ValueError:
+                text += " Move or clear the safe spot if it is outside the new limits before saving."
+        self.info(text)
 
     def _choose_safe_spot(self):
         self.canvas.mode = "click"
@@ -950,7 +1008,7 @@ class SetupWizard(tk.Toplevel):
 
     def _got_safe_spot(self, x, y):
         try:
-            self.s.calibration.safe_spot = logic.pick_safe_spot(self.s, (x,y))
+            self.s.calibration.safe_spot = logic.pick_safe_spot(self.s, (x,y), self.ctx.minimap_view)
         except ValueError as exc:
             self.error(str(exc))
             return
@@ -981,14 +1039,14 @@ class SetupWizard(tk.Toplevel):
 
     def _set_edge(self, side: str):
         def got(image):
-            from maplebot.perception.calib import minimap_player_position
+            self._set_main_image(image)
             c = self.s.calibration
-            pos = minimap_player_position(image, c.minimap_box, c.player_dot_hsv_low, c.player_dot_hsv_high)
+            pos = self.ctx.dot_pos
             self.patrol_image = image
             if pos is None:
                 self._redraw_patrol()
                 self.error("Couldn't see your yellow dot on the minimap. Make sure the minimap is "
-                           "open and the game window hasn't moved, then try again (or redo steps 3-4).")
+                           "open, then try again or check Game and HUD.")
                 return
             x = round(float(pos[0]), 3)
             setattr(self.ctx, f"patrol_{side}_set", x)
@@ -1016,32 +1074,32 @@ class SetupWizard(tk.Toplevel):
 
     def _redraw_patrol(self):
         img = self.patrol_image if self.patrol_image is not None else self.image
-        if img is None:
+        if img is None or self.s.calibration.minimap_box is None:
             self.canvas.show(None)
             return
         c = self.s.calibration
         x, y, w, h = c.minimap_box
         ovs = [("box", tuple(c.minimap_box), CYAN, "")]
-        band = logic.patrol_band(c)
-        if band is not None:
-            y0, y1 = y + band[0] * h, y + band[1] * h
-        else:
-            y0, y1 = y, y + h
-        for frac in (c.patrol_left, c.patrol_right):
-            ovs.append(("vline", x + frac * w, (y0, y1), MAGENTA))
-        pos = None
-        try:
-            from maplebot.perception.calib import minimap_player_position
-            pos = minimap_player_position(img, c.minimap_box, c.player_dot_hsv_low, c.player_dot_hsv_high)
-        except Exception:
-            log.exception("dot lookup failed")
-        if pos is not None:
-            ovs.append(("dot", logic.minimap_dot_to_image(c.minimap_box, pos), GREEN))
-        if c.safe_spot is not None:
-            ovs.append(("dot", logic.minimap_dot_to_image(c.minimap_box,c.safe_spot), "#ffffff"))
-        for pl in c.platforms:
-            ovs.append(("polyline", [logic.minimap_dot_to_image(c.minimap_box, point)
-                                     for point in pl["points"]], CYAN))
+        pos = self._registered_player(img)
+        view = self.ctx.minimap_view
+        if not c.map_reference or view:
+            dx,dy,bx,by=view if view else (0,0,w,h)
+            band=logic.patrol_band(c)
+            y0,y1=(max(y,y+dy+band[0]*by),min(y+h,y+dy+band[1]*by)) if band else (y,y+h)
+            for frac in (c.patrol_left,c.patrol_right):
+                px=x+dx+frac*bx
+                if x<=px<x+w and y0<y1:ovs.append(('vline',px,(y0,y1),MAGENTA))
+            if pos is not None:
+                ovs.append(('dot',logic.minimap_dot_to_image(c.minimap_box,pos,view),GREEN))
+            if c.safe_spot is not None:
+                sx,sy=logic.minimap_dot_to_image(c.minimap_box,c.safe_spot,view)
+                if x<=sx<x+w and y<=sy<y+h:ovs.append(('dot',(sx,sy),'#ffffff'))
+            import cv2
+            for pl in c.platforms:
+                for a,b in zip(pl['points'],pl['points'][1:]):
+                    pa,pb=(logic.minimap_dot_to_image(c.minimap_box,v,view) for v in (a,b))
+                    ok,pa,pb=cv2.clipLine((x,y,w,h),pa,pb)
+                    if ok:ovs.append(('polyline',[pa,pb],CYAN))
         self.canvas.overlays = ovs
         m = 6
         self.canvas.show(img, region=[x - m, y - m, w + 2 * m, h + 2 * m], zoom=True)

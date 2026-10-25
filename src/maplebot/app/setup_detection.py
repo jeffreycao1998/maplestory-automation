@@ -91,3 +91,21 @@ def detect_screen(ctx, image, owned=None):
     result.hp = bar_fill(image, c.hp_bar_box)
     result.mp = bar_fill(image, c.mp_bar_box)
     return result
+
+
+def registered_player(ctx, image, tracker=None):
+    """Own-dot measurement with a fresh coordinate transform, or unknown."""
+    c=ctx.settings.calibration
+    pos=unique_player_dot(image,c.minimap_box,c.player_dot_hsv_low,c.player_dot_hsv_high)
+    ctx.minimap_view=None
+    if c.map_reference:
+        view=tracker.align(image,c.minimap_box) if tracker and c.minimap_box else None
+        if not view:
+            pos=None
+        else:
+            ctx.minimap_view=view.values()
+            if pos:
+                pos=view.to_map(pos[0]*c.minimap_box[2],pos[1]*c.minimap_box[3])
+                if not all(0<=v<=1 for v in pos):pos=None
+    ctx.dot_pos=pos
+    return pos

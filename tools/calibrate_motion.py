@@ -92,14 +92,26 @@ def main(argv=None):
     parser.add_argument('recording',type=Path);parser.add_argument('--profile',type=Path,default=Path('profile'))
     parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args(argv)
-    settings=Profile(args.profile).load();cal=settings.calibration
+    profile=Profile(args.profile)
+    settings=profile.load();cal=settings.calibration
     if cal.minimap_box is None:parser.error("Calibrate the minimap before measuring movement")
     try:
         events=[json.loads(row) for row in (args.recording/'keys.jsonl').read_text().splitlines() if row.strip()]
+        from maplebot.perception.map_reference import MapReference
+        descriptor=profile.map_reference_descriptor(settings)
+        tracker=MapReference.from_descriptor(descriptor) if descriptor else None
+        samples=[]
         with FolderCapture(args.recording,fps=None) as capture:
-            samples=[(f.t,minimap_player_position(f.image,cal.minimap_box,cal.player_dot_hsv_low,cal.player_dot_hsv_high)) for f in capture]
+            for f in capture:
+                pos=minimap_player_position(f.image,cal.minimap_box,cal.player_dot_hsv_low,cal.player_dot_hsv_high)
+                if tracker:
+                    view=tracker.align(f.image,cal.minimap_box)
+                    pos=view.to_map(pos[0]*cal.minimap_box[2],pos[1]*cal.minimap_box[3]) if view and pos else None
+                    if pos and not all(0<=v<=1 for v in pos):pos=None
+                samples.append((f.t,pos))
         report=measure(samples,events,settings.keys)
         report['recording']=str(args.recording)
+        report['map_reference']=cal.map_reference
         args.output.parent.mkdir(parents=True,exist_ok=True)
         if args.output.exists():raise ValueError('Output exists; choose a new report path')
         args.output.write_text(json.dumps(report,indent=2))

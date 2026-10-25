@@ -4,6 +4,27 @@ Owner: main agent. Subagents read this; they propose changes rather than editing
 Data types live in `src/maplebot/types.py`; settings in `src/maplebot/settings.py`.
 Both are owned by the main agent.
 
+## Stable map coordinates (optional full-map reference)
+
+`calibration.map_reference` identifies a checksummed map image in the current map's
+sprite bank, its source build/map ID and world-to-image scale. When configured,
+`Perception.player_map` uses full-map fractions rather than current minimap-viewport
+fractions. Registration is repeated as the minimap scrolls; a missing/ambiguous match
+returns an unknown position, never the last known point. Existing setups without a
+reference retain viewport coordinates.
+
+`Perception.minimap_view = (offset_x_px, offset_y_px, pixels_per_map_x,
+pixels_per_map_y)` maps full-map fractions back into the visible minimap. Add the
+calibrated minimap box's origin after applying it. Overlays must use this transform;
+navigation operates only on stable full-map coordinates. Switching coordinate spaces
+invalidates previous patrol/route/movement calibration before review and Save.
+
+Source footholds and spawn coordinates are candidate geometry. Connection generation
+uses measured movement capabilities and never treats spawn adjacency as a traversal.
+Graph search minimizes summed connection time budgets. Sprite history only proposes
+small search regions: every returned mob must pass a match on the current pixels.
+No predicted/cached box is emitted when the current image fails verification.
+
 ## Tick loop (`src/maplebot/runner.py`, main agent)
 
 ```
@@ -38,7 +59,8 @@ class ScreenCapture:
 
 # maplebot/perception/perceiver.py   (re-exported from maplebot.perception)
 class Perceiver:
-    def __init__(self, settings: Settings, mob_templates: list[Path], player_template: Path | None)
+    def __init__(self, settings: Settings, mob_templates: list[Path], player_template: Path | None,
+                 item_templates=None, alert_templates=None, hud_sync=False, map_reference=None)
     def perceive(self, frame: Frame) -> Perception
     def update_settings(self, settings: Settings) -> None
 

@@ -30,7 +30,7 @@ def main(argv=None):
     profile=Profile(args.profile);settings=profile.load()
     # OCR is unrelated to label proposals and must not spawn background readers here.
     settings.ocr.enabled=False
-    per=Perceiver(settings,profile.mob_templates(),profile.player_template(),profile.item_templates())
+    per=Perceiver(settings,profile.mob_templates(),profile.player_template(),profile.item_templates(), map_reference=profile.map_reference_descriptor(settings))
     import tkinter as tk
     from tkinter import ttk
     from maplebot.app.widgets import ImageCanvas

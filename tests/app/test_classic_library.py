@@ -50,7 +50,7 @@ def classic(tmp_path, monkeypatch):
         elif parsed.path.endswith('/record'): value=library.responses[query['key'][0]]
         elif parsed.path.endswith('/category'):
             value={'items':library.responses['items']['records'],'pages':1}
-        else:value=library.responses['node']
+        else:value=library.responses.get(query.get('node',['node'])[0],library.responses['node'])
         path.write_text(json.dumps(value));return path
     monkeypatch.setattr(library,'_fetch',fetch)
     return library
@@ -128,3 +128,23 @@ def test_per_tick_reference_budget_does_not_start_with_only_one_species():
     ordered=interleave_references(paths)
     assert {p.name.split('_')[2] for p in ordered[:3]}=={'6','7','11'}
     assert len(ordered)==len(paths) and set(ordered)==set(paths)
+
+
+def test_real_shape_map_references_are_downloaded_checked_and_installed(classic,tmp_path):
+    classic.responses['map'].update(wz='Map/Map/Map0/010002061.img',
+        minimap={'width':1600,'height':1600,'center_x':0,'center_y':0,'world_scale':16,
+                 'image':{'file':'wz/map.png'}},mobs=[{'id':'7','x':400,'y':780,'cy':800,'fh':1}])
+    classic.responses['foothold']={'data':{'$type':'Property','children':{
+        '0':{'$type':'Property','children':{'1':{'$type':'Property','children':{
+            '1':{'$type':'Property','children':{'x1':'100','x2':'1500','y1':'800','y2':'800'}}}}}}}}}
+    classic.responses['ladderRope']={'data':{'$type':'Property','children':{}}}
+    pack=tmp_path/'map-pack';manifest=classic.build_pack('10002061',pack)
+    assert len(manifest['reference_files'])==1
+    geometry=manifest['map_reference']['geometry']
+    assert len(geometry['platforms'])==1 and len(geometry['spawn_zones'])==1
+    profile=Profile(tmp_path/'map-profile');profile.ensure()
+    installed=S.install_pack(pack,profile.templates_dir)
+    from maplebot.app.map_zones import reference_descriptor
+    desc=reference_descriptor(profile,installed)
+    settings=profile.load();settings.calibration.map_reference={k:v for k,v in desc.items() if k!='path'}
+    assert Path(profile.map_reference_descriptor(settings)['path']).is_file()

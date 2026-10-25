@@ -154,3 +154,45 @@ process hiding, prompt bypasses or anti-cheat manipulation are implemented.
 
 For OCR-based stock, inventory-full notification reading and the independent movement
 input lease, see [the reliability guide](reliability.md).
+
+
+## Map and spawn-zone picker
+
+On **Training area**, use **Map and spawn zones…** after downloading the current map's
+sprite pack. Refresh the screenshot while standing on a platform first. The picker
+requires a strong match between the visible minimap and that map's downloaded image,
+and exactly one known safe platform under your own dot. A position on a rope, an
+ambiguous dot or another map's image cannot initialize the plan.
+
+Orange markers show source spawn locations. Click a marker or its platform to choose
+a training destination. The picker refuses a destination if the current platform has
+no supported path to it. Selecting a spawn does not chase an invisible monster; the
+bot travels to the selected training platform, then uses current screen detections.
+
+Applying the plan changes to full-map coordinates, imports platforms and ladders, and
+clears the previous safe spot and viewport route/measurements. This remains an
+in-memory wizard edit until **Save**. Choose a safe spot again in the new coordinates.
+When the minimap scrolls, the bot verifies the current crop against the source image.
+If registration fails it reports a missing position and stops movement. Overlays and
+retreat destinations use the same transform.
+
+Jump and rope routes need measured character capabilities. After aligning and saving
+the map, manually record walking, three complete directional jumps and climbing:
+
+```powershell
+.venv\Scripts\python.exe -m tools.record --name movement --fps 15 --seconds 90 --keys
+.venv\Scripts\python.exe -m tools.calibrate_motion data/recordings/movement --profile profile --output reports/movement.json
+```
+
+Use the recorder's `--help` for capture options and stopping controls. Review the
+recording and report, reopen the picker, check the review box and import the JSON.
+The report must have no unresolved warnings and must match the map image, build and
+full-map coordinate basis. Movement limits are never borrowed from a modern bot.
+Only then are supported jump/climb links proposed. Inspect them in **Observe only**;
+a proposed route still needs live validation by you. Landing timeouts, loss of rope
+alignment and missing paths stop traversal rather than improvising another jump.
+
+Kerning City Construction Site contains many platforms and 14 ropes/ladders in the
+current source data. Some rope bases require a jump to grab them. The importer and
+picker expose these prerequisites, but bottom-to-top travel is not yet live verified.
+[Research and measured limits](../reports/open-source-navigation-review.md).

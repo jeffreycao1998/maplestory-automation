@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from collections import deque
 from typing import Optional, Sequence, Tuple
 
 from maplebot.settings import Settings
@@ -325,16 +324,24 @@ class MapModel:
         return pl
 
     def path(self, source: str, target: str) -> Tuple[Connection, ...]:
-        queue = deque([(source, ())])
-        seen = {source}
+        # Prefer the smallest travel budget, rather than the fewest transitions.
+        # Ties use insertion order so route selection is reproducible.
+        import heapq
+        from itertools import count
+        serial = count()
+        queue = [(0., next(serial), source, ())]
+        costs = {source: 0.}
         while queue:
-            node, path = queue.popleft()
+            cost, _, node, path = heapq.heappop(queue)
+            if cost > costs[node]:
+                continue
             if node == target:
                 return path
             for edge in self.connections:
-                if edge.source == node and edge.target not in seen:
-                    seen.add(edge.target)
-                    queue.append((edge.target, path + (edge,)))
+                candidate = cost + edge.timeout_s
+                if edge.source == node and candidate < costs.get(edge.target, float('inf')):
+                    costs[edge.target] = candidate
+                    heapq.heappush(queue, (candidate, next(serial), edge.target, path + (edge,)))
         return ()
 
     def by_name(self, name: str) -> Platform:

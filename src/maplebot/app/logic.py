@@ -142,10 +142,10 @@ def clamp_box(box: Optional[Sequence[Any]], img_w: int, img_h: int) -> Optional[
     return x0, y0, x1 - x0, y1 - y0
 
 
-def minimap_dot_to_image(box: Sequence[int], pos: Sequence[float]) -> Tuple[int, int]:
+def minimap_dot_to_image(box: Sequence[int], pos: Sequence[float], view=None) -> Tuple[int, int]:
     """(fx, fy) fractions of the minimap box -> image pixel."""
-    x, y, w, h = box
-    return int(x + pos[0] * w), int(y + pos[1] * h)
+    from maplebot.perception.map_reference import map_to_image
+    return map_to_image(box,pos,view)
 
 
 def dot_near_click(box: Sequence[int], pos: Optional[Sequence[float]], click: Sequence[int],
@@ -736,9 +736,9 @@ WIZARD_STEPS: List[WizardStep] = [
     WizardStep("supplies", "Visible supplies (optional)",
                "Box just the number on each potion shortcut, your meso balance, and optionally the loot notification area. Test the readings before enabling local OCR. You can skip this step.", optional=True),
     WizardStep("patrol", "Training area",
-               "Walk your character to the LEFT end of where it should train, then click Set left. "
-               "Then walk to the RIGHT end and click Set right. Pick one bridge, set both edges on "
-               "that same bridge, a little in from its ends. The app hides for 3 s each time."),
+               "Drag between the left and right training limits on the zoomed minimap. "
+               "Pick the same bridge you are standing on, a little in from its ends. "
+               "The walk-to-edge buttons are also available."),
     WizardStep("keys", "Keys",
                "Click a button, then press that key. Set your attack skill and jump; potion keys "
                "are optional. Also tell the bot how far your skill reaches and how fast it casts."),
@@ -767,6 +767,7 @@ class WizardContext:
     settings: Settings
     window_box: Optional[Box] = None             # client area found in step 1
     screenshot_size: Optional[Tuple[int, int]] = None   # (w, h) of the current screenshot
+    minimap_view: Optional[Tuple[float, float, float, float]] = None
     dot_pos: Optional[Tuple[float, float]] = None       # dot seen with the current colours
     n_mob_templates: int = 0
     has_player_template: bool = False      # profile/templates/player.png exists
@@ -1185,7 +1186,7 @@ def clean_map_name(raw: Optional[str]) -> Optional[str]:
     return name or None
 
 
-def pick_safe_spot(settings, click):
+def pick_safe_spot(settings, click, view=None):
     """Image pixel click -> validated minimap marker; shared by wizard and tests."""
     from maplebot.mapmodel import MapModel
     box = settings.calibration.minimap_box
@@ -1195,7 +1196,86 @@ def pick_safe_spot(settings, click):
     px,py = click
     if not (x <= px < x+w and y <= py < y+h):
         raise ValueError("Click inside the minimap, on a known safe platform")
-    point = [(px+.5-x)/w, (py+.5-y)/h]
+    point = image_to_map(settings,click,view)
     model = MapModel.from_settings(settings)
-    model.safe_platform(point, settings.behavior.edge_margin)
+    dest=model.safe_platform(point, settings.behavior.edge_margin)
+    if settings.calibration.map_reference:
+        for source in model.route:
+            if source!=dest.name and not model.path(source,dest.name):
+                raise ValueError('No measured route from the training platform to this safe spot.')
+    return point
+
+
+def select_patrol_segment(ctx: WizardContext, start, end, player_pos):
+    """Set a single-platform patrol from two screenshot points, after all checks.
+
+    Unknown geometry requires the player's dot inside the selected span/height band;
+    source spawn dots are never taken as evidence of a walkable connection.
+    """
+    from maplebot.mapmodel import MapModel
+    c = ctx.settings.calibration
+    if c.minimap_box is None:
+        raise ValueError("Detect the minimap first.")
+    if len(c.route)>1:
+        raise ValueError("This map uses a multi-platform route. Edit its route in Settings; "
+                         "this quick selector is for one platform.")
+    x, y, w, h = c.minimap_box
+    if w <= 0 or h <= 0:
+        raise ValueError("Detect a valid minimap first.")
+    def point(value):
+        if (not isinstance(value, (list, tuple)) or len(value) != 2
+                or any(not isinstance(v, (int, float)) or isinstance(v, bool)
+                       or not math.isfinite(v) for v in value)):
+            raise ValueError("Drag between two points inside the minimap.")
+        px, py = value
+        if not (x <= px < x+w and y <= py < y+h):
+            raise ValueError("Keep both training limits inside the minimap.")
+        return tuple(image_to_map(ctx.settings,value,ctx.minimap_view))
+    left, right = sorted((point(start), point(end)))
+    problem = validate_patrol(left[0], right[0])
+    if problem:
+        raise ValueError("Drag a wider span from left to right on one platform.")
+    platform = None
+    if c.platforms:
+        model = MapModel.from_settings(ctx.settings)
+        a = model.safe_platform(list(left), ctx.settings.behavior.edge_margin)
+        b = model.safe_platform(list(right), ctx.settings.behavior.edge_margin)
+        if a.name != b.name:
+            raise ValueError("Both limits must be on the same known platform.")
+        platform = a.name
+    else:
+        problem = patrol_y_warning(left[1], right[1], tolerance_above(c))
+        if problem:
+            raise ValueError(problem)
+        if (player_pos is None or len(player_pos) != 2
+                or any(not isinstance(v, (float, int)) or isinstance(v, bool)
+                       or not math.isfinite(v) or not 0 <= v <= 1 for v in player_pos)):
+            raise ValueError("Refresh the minimap so your own dot is visible first.")
+        anchor = (left[1]+right[1])/2
+        if not (left[0] <= player_pos[0] <= right[0] and
+                anchor-tolerance_above(c) <= player_pos[1] <= anchor+c.patrol_y_tolerance):
+            raise ValueError("Include your green dot and select the platform you are standing on. "
+                             "Move there once and refresh if choosing another platform.")
+    # No changes occur until every validation above has passed.
+    ctx.patrol_left_set = c.patrol_left = left[0]
+    ctx.patrol_right_set = c.patrol_right = right[0]
+    ctx.patrol_left_y, ctx.patrol_right_y = left[1], right[1]
+    c.patrol_y = (left[1]+right[1])/2
+    if platform is not None:
+        c.route = [platform]
+    return platform
+
+
+def image_to_map(settings, click, view=None):
+    """Screen point -> the configured coordinate basis, refusing missing alignment."""
+    c=settings.calibration
+    x,y,w,h=c.minimap_box
+    if w<=0 or h<=0:
+        raise ValueError('Detect a valid minimap first.')
+    if c.map_reference and view is None:
+        raise ValueError('Map alignment is missing. Refresh the minimap before selecting a point.')
+    dx,dy,bx,by=view if view is not None else (0,0,w,h)
+    point=[(click[0]+.5-x-dx)/bx,(click[1]+.5-y-dy)/by]
+    if not all(math.isfinite(v) and 0<=v<=1 for v in point):
+        raise ValueError('Choose a point inside the map.')
     return point

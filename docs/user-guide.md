@@ -77,9 +77,13 @@ Future updates use the button.
 3. **Your name tag.** Save a tight example of the name under your own character, so
    another player's character cannot become the attack origin. Existing saved names
    can be kept when setting up another map with the same character.
-4. **Training area.** Set the left and right edges of one known safe platform. Existing
-   setup can be kept for a previously calibrated map. Map data never silently enables
-   unverified movement routes.
+4. **Training area.** Drag between two limits on your current platform in the zoomed
+   minimap, including your green dot. Keep both limits in from ledges. The old walk-to-
+   position buttons are also available. **Map and spawn zones…** previews downloaded
+   platforms and spawn markers and lets you choose a reachable training platform.
+   Download the map pack again once to get the new map image and geometry. Read the
+   [map-navigation setup](navigation.md#map-and-spawn-zone-picker) before changing from
+   viewport coordinates to full-map navigation.
 5. **Keys.** Set your attack, jump and potion keys and review your skill's reach and
    timing. These are your bindings; the app cannot infer changed in-game keybindings.
 6. **Done.** Review and Save, then try **Observe only** before enabling game keys.

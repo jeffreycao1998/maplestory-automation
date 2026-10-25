@@ -3,7 +3,7 @@ Frame -> Perception.
 
 Pipeline per frame (all OpenCV, no models):
   1. Minimap: HSV mask of the player-dot colour inside calibration.minimap_box, largest
-     sane blob -> player_map (fractions of the box).
+     sane blob -> player_map; registered to full-map fractions when configured.
   2. Mobs, two stages per template (and its mirror if detection.mirror_templates):
      a. Propose: grayscale TM_CCOEFF_NORMED on a copy downscaled by detection.downscale;
         local maxima >= mob_threshold - COARSE_MARGIN (at most MAX_VERIFY_PER_TEMPLATE).
@@ -176,7 +176,11 @@ def _as_box(v) -> Optional[Box]:
 
 class Perceiver:
     def __init__(self, settings: Settings, mob_templates: List[Path], player_template: Optional[Path],
-                 item_templates: Optional[List[Path]] = None, alert_templates: Optional[List[Path]] = None, hud_sync: bool = False):
+                 item_templates: Optional[List[Path]] = None, alert_templates: Optional[List[Path]] = None, hud_sync: bool = False,
+                 map_reference=None):
+        from .map_reference import MapReference
+        self._map_reference = MapReference.from_descriptor(map_reference) if map_reference else None
+        self._reference_metadata = {k:v for k,v in map_reference.items() if k!='path'} if map_reference else None
         self._hud_sync = hud_sync
         self._hud = None
         self._alerts = AlertMatcher(alert_templates)
@@ -303,9 +307,21 @@ class Perceiver:
 
         # 1. minimap
         player_map = None
+        minimap_view = None
         if minimap_box is not None:
             player_map = calib.minimap_player_position(
                 img, minimap_box, cal.player_dot_hsv_low, cal.player_dot_hsv_high)
+        if cal.map_reference:
+            view = self._map_reference.align(img, minimap_box) if (
+                self._map_reference and minimap_box and cal.map_reference == self._reference_metadata) else None
+            if view is None:
+                player_map = None
+            else:
+                minimap_view = view.values()
+                if player_map is not None:
+                    player_map = view.to_map(player_map[0]*minimap_box[2], player_map[1]*minimap_box[3])
+                    if not all(0 <= v <= 1 for v in player_map):
+                        player_map = None
         if player_map is None:
             flags.add(Flag.MINIMAP_MISSING)
 
@@ -372,7 +388,7 @@ class Perceiver:
         return Perception(
             t=t, screen_size=(w, h), player_map=player_map, player_screen=player_screen,
             player_screen_estimated=estimated, mobs=tuple(mobs), hp=hp, mp=mp,
-            flags=frozenset(flags), confidence=conf, items=items, **hud,
+            flags=frozenset(flags), confidence=conf, items=items, minimap_view=minimap_view, **hud,
         )
 
     # ---- mobs -------------------------------------------------------------------------

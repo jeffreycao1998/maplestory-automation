@@ -3,6 +3,9 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import json
+
+from maplebot.settings import REPO_ROOT
 import cv2
 import numpy as np
 
@@ -25,6 +28,9 @@ class SpriteMatcher:
     def __init__(self):
         self.templates = []
         self._cursor = 0
+        self._tracks = []
+        self._shape = None
+        self._tracking = json.loads((REPO_ROOT/'configs/sprite-tracking.yaml').read_text())
 
     def add(self, path: Path) -> bool:
         """True for an RGBA sprite (including a rejected/empty RGBA file)."""
@@ -44,12 +50,58 @@ class SpriteMatcher:
             self.templates.append((path.name, bgr, mask))
         return True
 
+    @staticmethod
+    def _species(name):
+        match=re.match(r'mob_(?:library|catalog)_([0-9]+)(?:_|\.)',name)
+        return match.group(1) if match else name
+
+    def _verify_tracks(self,image,threshold,exclude,mirror):
+        """History proposes small search regions; current pixels alone confirm mobs.
+
+        Check every animation pose of the same species, so the global round-robin
+        budget cannot make a previously visible mob disappear when it animates.
+        No velocity prediction or unverified old box is returned to behavior.
+        """
+        detections=[]
+        radius=int(self._tracking['radius_px'])
+        threshold=max(threshold,float(self._tracking['min_score']))
+        for old in self._tracks:
+            x0,y0=max(0,old.x-old.w//2-radius),max(0,old.y-old.h//2-radius)
+            x1,y1=min(image.shape[1],old.x+old.w//2+radius),min(image.shape[0],old.y+old.h//2+radius)
+            roi=image[y0:y1,x0:x1]
+            best=None
+            pool=[t for t in self.templates if self._species(t[0])==self._species(old.template)]
+            pool.sort(key=lambda t:t[0]!=old.template)
+            for name,bgr,mask in pool[:int(self._tracking["max_pose_checks"])]:
+                h,w=bgr.shape[:2]
+                if roi.shape[0]<h or roi.shape[1]<w:continue
+                for flip in range(2 if mirror else 1):
+                    template=cv2.flip(bgr,1) if flip else bgr
+                    alpha=cv2.flip(mask,1) if flip else mask
+                    scores=cv2.matchTemplate(roi,template,cv2.TM_CCOEFF_NORMED,mask=alpha)
+                    np.nan_to_num(scores,copy=False,nan=-1,posinf=-1,neginf=-1)
+                    _,score,_,(dx,dy)=cv2.minMaxLoc(scores)
+                    if score<threshold:continue
+                    cx,cy=x0+dx+w//2,y0+dy+h//2
+                    if any(bx<=cx<bx+bw and by<=cy<by+bh for bx,by,bw,bh in exclude):continue
+                    if best is None or score>best.score:
+                        best=Mob(cx,cy,w,h,float(min(1,score)),name)
+                if best is not None and best.score>=float(self._tracking["strong_score"]):break
+            if best is not None:detections.append(best)
+        return detections
+
     def find(self, image, threshold, exclude=(), mirror=True, region=None, budget=None):
         ox, oy, rw, rh = region if region is not None else (0, 0, image.shape[1], image.shape[0])
         roi = image[oy:oy+rh, ox:ox+rw]
         if roi.size == 0:
             return []
-        detections = []
+        # Item searches use a moving floor band; only whole-screen mob searches
+        # retain proposals. A changed capture size discards all old coordinates.
+        track = region is None and budget is not None
+        if self._shape != image.shape:
+            self._tracks=[]
+            self._shape=image.shape
+        detections = self._verify_tracks(image,threshold,exclude,mirror) if track else []
         small = cv2.resize(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY), None, fx=0.5, fy=0.5,
                            interpolation=cv2.INTER_AREA)
 
@@ -98,4 +150,6 @@ class SpriteMatcher:
                 kept.append(m)
             if len(kept) >= 40:
                 break
+        if track:
+            self._tracks=kept[:int(self._tracking["max_tracks"])]
         return kept

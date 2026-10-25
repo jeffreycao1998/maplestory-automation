@@ -159,12 +159,27 @@ class ClassicWorldLibrary(LegacySpriteLibrary):
         missing = set(mids) - {row["id"] for row in entries if row["kind"] == "mob"}
         if missing:
             raise AssetError("No usable Classic sprites for: " + ", ".join(names[mid] for mid in missing))
+        reference_files=[]
+        map_ref={'bounds':info.get('bounds'),'minimap':info.get('minimap'),
+                 'mob_stats':knowledge,'spawns':info.get('mobs',[]),'requires_alignment':True}
+        try:
+            from maplebot.mapmodel.source import source_geometry
+            progress('Reading map platforms, ladders and spawn zones…')
+            nodes=[]
+            for node in ('foothold','ladderRope'):
+                nodes.append(self._fetch_json(self._api('node',path=info['wz'],node=node))['data'])
+            map_ref['geometry']=source_geometry(*nodes,info['minimap'],info.get('mobs',[]),names)
+            source=self._fetch(self._file(info['minimap']['image']['file']),4*1024*1024)
+            digest=self._png(source,output/'reference_minimap.png')
+            reference_files=[{'file':'reference_minimap.png','sha256':digest}]
+        except Exception as e:
+            self._check_cancelled()
+            warnings.append(f'Map navigation references unavailable: {e}')
         manifest = {"schema": 1, "map_id": map_id, "map_name": info["name"],
                     "source_game": "MapleStory Classic World", "source_snapshot": self.snapshot,
                     "source_client_build": self.build, "source": self.base + "/raw",
                     "source_kind": "community_client_extraction", "validated_on_classic": False,
-                    "map_reference": {"bounds": info.get("bounds"), "minimap": info.get("minimap"),
-                                      "mob_stats": knowledge, "requires_alignment": True},
+                    "map_reference": map_ref, "reference_files":reference_files,
                     "drop_source": "Common current-client pickup icons; not a server drop table",
                     "entries": entries, "warnings": warnings + failures}
         (output / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")

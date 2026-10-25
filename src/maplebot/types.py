@@ -60,7 +60,7 @@ class Flag(str, Enum):
 class Perception:
     t: float
     screen_size: Tuple[int, int]         # (w, h) of the frame
-    player_map: Optional[PointF]         # yellow dot on minimap, 0..1 fractions; None if not found
+    player_map: Optional[PointF]         # yellow dot, full-map fractions when registered, else viewport; None if unknown
     player_screen: Optional[PointPx]     # character position on screen
     player_screen_estimated: bool        # True if player_screen is a guess (no name-tag match)
     mobs: Tuple[Mob, ...]                # excludes anything inside minimap / HP / MP boxes
@@ -74,6 +74,7 @@ class Perception:
     mesos: Optional[int] = None
     inventory_full: Optional[bool] = None
     hud_t: Optional[float] = None
+    minimap_view: Optional[Tuple[float, float, float, float]] = None  # offset px + pixels per full-map fraction
 
 
 class Action(str, Enum):

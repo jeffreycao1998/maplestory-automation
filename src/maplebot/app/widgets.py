@@ -115,7 +115,8 @@ def file_thumbnail(path, max_side: int = 72):
 class ImageCanvas(ttk.Frame):
     """Shows (part of) a screenshot scaled to fit; reports drags/clicks in image pixels.
 
-    mode: "box" -> on_box(box) after a drag; "click" -> on_click(x, y); None -> view only.
+    mode: "box" -> on_box(box); "line" -> on_line(start, end); "click" -> on_click(x, y).
+    None is view only. All callbacks receive original image coordinates.
     Overlays (boxes / markers in image coords) are redrawn on every refresh.
     """
 
@@ -130,6 +131,7 @@ class ImageCanvas(ttk.Frame):
         self.mode: Optional[str] = None
         self.on_box: Optional[Callable] = None
         self.on_click: Optional[Callable] = None
+        self.on_line: Optional[Callable] = None
         self._photo = None
         self._drag_start = None
         self._drag_id = None
@@ -194,6 +196,9 @@ class ImageCanvas(ttk.Frame):
         if self.mode == "box":
             self._drag_id = self.canvas.create_rectangle(e.x, e.y, e.x, e.y, outline=YELLOW,
                                                          width=2, dash=(4, 2))
+        elif self.mode == "line":
+            self._drag_id = self.canvas.create_line(e.x, e.y, e.x, e.y, fill=YELLOW,
+                                                   width=2, dash=(4, 2))
 
     def _motion(self, e):
         if self._drag_id is not None and self._drag_start:
@@ -211,6 +216,9 @@ class ImageCanvas(ttk.Frame):
             box = self.view.drag_to_box(start[0], start[1], e.x, e.y)
             if self.on_box:
                 self.on_box(box)        # None = too small (treated as a mis-click)
+        elif self.mode == "line":
+            if self.on_line:
+                self.on_line(self.view.to_image(*start), self.view.to_image(e.x, e.y))
         elif self.mode == "click":
             x, y = self.view.to_image(e.x, e.y)
             if self.on_click:

@@ -89,13 +89,14 @@ class Calibration:
     mp_stock_box: Optional[List[int]] = None
     mesos_box: Optional[List[int]] = None
     notification_box: Optional[List[int]] = None
+    map_reference: Optional[dict] = None    # source/build/bank metadata, never a live client pointer
     player_dot_hsv_low: List[int] = field(default_factory=lambda: [20, 150, 180])
     player_dot_hsv_high: List[int] = field(default_factory=lambda: [35, 255, 255])
 
 
 @dataclass
 class Detection:
-    sprite_templates_per_tick: int = 8  # round-robin budget for imported references
+    sprite_templates_per_tick: int = 8  # global pose search budget; fresh local checks retain sightings
     item_threshold: float = 0.82
     mob_threshold: float = 0.70
     player_threshold: float = 0.75
@@ -409,6 +410,33 @@ class Profile:
 
     def mob_templates(self) -> List[Path]:
         return sorted(self.templates_dir.glob("mob_*.png")) + self.library_templates("mob")
+
+    def sprite_library_manifest(self):
+        record=self.templates_dir/'sprite-library.json'
+        if not record.is_file():return None
+        value=json.loads(record.read_text(encoding='utf-8'))
+        from .app.sprite_library import compatible_manifest
+        if not compatible_manifest(value) or not re.fullmatch(r'[0-9a-f]{32}',value.get('bank','')):
+            return None
+        return value
+
+    def map_reference_descriptor(self, settings=None):
+        """Resolve a portable bank reference, validating its source and file checksum."""
+        import hashlib
+        settings=settings or self.load()
+        ref=settings.calibration.map_reference
+        if not ref:return None
+        if not isinstance(ref,dict):
+            raise MapError('Saved map reference must be an object. Align the map again.')
+        current=self.sprite_library_manifest()
+        if (not current or current.get('map_id')!=ref.get('map_id') or
+                current.get('source_client_build')!=ref.get('source_client_build') or
+                not re.fullmatch(r'[0-9a-f]{32}',ref.get('bank',''))):
+            raise MapError('Saved map reference does not match this map/build. Download its map pack and align it again.')
+        path=self.templates_dir/'.sprite-banks'/ref['bank']/'reference_minimap.png'
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest()!=ref.get('sha256'):
+            raise MapError('Map reference image is missing or changed. Download and align the map again.')
+        return dict(ref,path=str(path))
 
     def library_templates(self, kind: str) -> List[Path]:
         """Only the atomically published bank is active; old banks/manual crops coexist."""

@@ -1,0 +1,7 @@
+{
+  "radius_px": 18,
+  "max_tracks": 8,
+  "max_pose_checks": 16,
+  "min_score": 0.90,
+  "strong_score": 0.98
+}

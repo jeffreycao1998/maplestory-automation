@@ -1,0 +1,13 @@
+{
+  "patch_size": 17,
+  "patch_stride": 12,
+  "max_patches": 48,
+  "texture_std": 20,
+  "min_patch_score": 0.92,
+  "min_inliers": 4,
+  "min_landmark_span_px": 18,
+  "translation_tolerance_px": 1.5,
+  "ambiguity_ratio": 1.4,
+  "tracking_slack_px": 10,
+  "scales": [1.0, 0.75, 1.25, 1.5, 2.0]
+}

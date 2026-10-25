@@ -294,9 +294,12 @@ def install_pack(pack: Path, templates: Path):
     """
     manifest = _json(pack / "manifest.json")
     entries = manifest["entries"]
-    for row in entries:
+    references=manifest.get('reference_files',[])
+    if len(references)>1 or any(row.get('file')!='reference_minimap.png' for row in references):
+        raise AssetError('Invalid map reference files')
+    for row in entries+references:
         name = row["file"]
-        if not re.fullmatch(r"(?:mob|item)_library_[0-9]+_[a-z0-9]+_[0-9]+\.png", name):
+        if name!='reference_minimap.png' and not re.fullmatch(r"(?:mob|item)_library_[0-9]+_[a-z0-9]+_[0-9]+\.png", name):
             raise AssetError("Invalid sprite pack filename.")
         if hashlib.sha256((pack / name).read_bytes()).hexdigest() != row["sha256"]:
             raise AssetError("Sprite pack checksum mismatch.")
@@ -309,7 +312,7 @@ def install_pack(pack: Path, templates: Path):
     try:
         # Close the temporary file before replace: Windows won't rename an open file.
         with os.fdopen(fd, "w", encoding="utf-8") as pointer:
-            for row in entries:
+            for row in entries+references:
                 shutil.copyfile(pack / row["file"], bank / row["file"])
             manifest = dict(manifest, bank=bank_id)
             json.dump(manifest, pointer, indent=2)
