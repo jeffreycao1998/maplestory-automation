@@ -41,7 +41,7 @@ from maplebot.settings import Settings
 from maplebot.types import Box, Flag, Frame, Item, Mob, Perception, PointPx
 
 from . import calib
-from .sprites import SpriteMatcher
+from .sprites import SpriteMatcher, interleave_references
 from .interruptions import AlertMatcher, central_panel
 from .hud import HUDReader
 
@@ -182,7 +182,7 @@ class Perceiver:
         self._alerts = AlertMatcher(alert_templates)
         self._sprites = SpriteMatcher()
         self._mob_raw: List[_Template] = []
-        for p in mob_templates or []:
+        for p in interleave_references(mob_templates or []):
             p = Path(p)
             if self._sprites.add(p):
                 continue

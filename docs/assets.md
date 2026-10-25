@@ -8,38 +8,53 @@ You can then click Next without drawing any monster boxes. Manual screenshot exa
 remain available if a pose is missed. A Git installation and terminal commands are not
 needed for this path.
 
-The global v83 map catalog identifies the map's monsters. The app requests each
-monster's standing, movement, flight, jump and supported attack/skill animation frames
-from the [MapleStory.io sprite API](https://github.com/crrio/maplestory.io/blob/master/maplestory.io/Controllers/API/MobController.cs).
-Death/hurt animation books are excluded. Identical poses are deduplicated. It also
-downloads the map's known Client Monster Book item icons; missing icons are reported.
-Only this map's references are loaded for detection, rather than scanning thousands
-of unrelated monsters every tick. Selecting another map in setup changes the references.
+The default downloader now targets **Global MapleStory Classic World**, using the
+community [Classic client-data viewer](https://maplestory.quest/raw), whose Release
+snapshot is labeled **Grand Launch v1.0.0, 21 October 2026**. This is a third-party
+extraction, not an official Nexon API or proof that your installed client matches it.
+Nexon describes [Classic World](https://www.nexon.com/mscw/landing) as a revised game
+with gameplay and balance changes. It must not be equated with legacy GMS v83.
 
-Downloads happen during setup, with progress, cancellation, HTTPS host restrictions,
-size limits and three concurrent asset requests. Files are cached in `profile/sprite-cache/`.
-No screenshots, names or profile data are uploaded. Each map's immutable sprite banks
-live under its templates folder; `sprite-library.json` atomically selects the active
-bank. Interrupted copying keeps the old bank active. Existing screenshot crops stay
-in place. Old banks are retained, and both app updates and map renaming preserve them.
+The current data uses different IDs: The Tree That Grew II is **10002061** and Slime
+is **7**, rather than v83's 101010101 and 210100. Its map record includes Slime, Stump
+and Dark Stump, so the old two-monster list was also incomplete. The source game,
+snapshot, build, source URLs and PNG hashes are recorded in the installed bank.
+Previously downloaded v83 banks remain on disk but are ignored by the default Classic
+provider; download the correct pack for each map. Saved screenshot examples are kept.
 
-The setup dialog highlights full-bank matches on the captured screenshot. Use **Observe
-only** on the main window to check the normal detector before enabling keys. A successful
-download is not a detection-accuracy test: v83 and Classic may differ, covered/partly
-off-screen mobs can be missed, and dropped icons can rotate or look unlike inventory
-icons. If the animation service is unavailable, any preview-only fallback is explicitly
-reported. The reference library is not a trained universal detector.
+Only the selected map's monster references are loaded. Every supported standing,
+movement, flight, jump and attack/skill animation is inspected; death/hurt poses are
+excluded, identical PNGs are deduplicated, and large/truncated or unsupported layered
+animations are reported. Frames from different species are interleaved within the
+existing per-tick budget instead of starting with every pose of one species.
 
-The Tree That Grew II download obtained **14 distinct monster poses and 52 item icons**;
-6 catalog item icons were unavailable. On the repository's one labeled screenshot,
-normal detection with the default 8-reference-per-tick budget found **3/6 mobs**, with
-0 false positives; an all-14-pose setup preview found **4/6**, with 0 false positives.
-The two remaining mobs were partly off-screen or covered by a hit effect. These results
-do not meet the 90% recall target or establish accuracy on other recordings/maps.
+Server drop tables are not in the raw client data. Pickup references come from a bounded
+**common current-client icon list**, not a verified per-monster drop list. Missing icons
+are reported. Periodic pickup can still collect unrecognized items you walk over.
+Reference matching does not prove an item entered inventory, and icon recognition is
+not universal drop detection. No v83 server drop data is joined to the new monster IDs.
 
-## Original command-line catalog importer
+Downloads run only during setup, with progress, cancellation, HTTPS host restrictions,
+size limits and at most three concurrent requests. Filtered item requests avoid fetching
+the oversized full equipment-animation index. Cached files stay in `profile/sprite-cache/`,
+namespaced by snapshot/build. No screenshots, names or profile data are uploaded.
+Each map's immutable banks are selected through an atomic `sprite-library.json` pointer;
+interrupted copying leaves the previous bank active. App updates preserve the profile.
 
-The reference importer selects a map's mobs and their Client Monster Book item drops
+The release pack for The Tree That Grew II produced **18 distinct monster poses and 30
+common pickup icons**. Two requested item names were unavailable. Full-bank preview on
+the repository's single labeled screenshot found **4/6 mobs**, with 0 false positives;
+clipped/covered mobs remained missed. This is not representative accuracy validation,
+does not meet the 90% recall target, and does not validate movement timing or geometry.
+Check the highlighted matches and use Observe only before enabling keys.
+
+The bank also preserves source bounds, minimap metadata and mob stats as references.
+It does not activate platform routes or replace measured jump/cast timings. No game
+client is downloaded, opened, read in memory or modified by this workflow.
+
+## Legacy GMS v83 importer (different game data)
+
+The original command-line reference importer selects a legacy map's mobs and their Client Monster Book item drops
 from the public [GMS v83 WZ catalog](https://github.com/andrenogrib/gms_v83_wztoweb).
 It copies transparent sprite PNGs and records IDs, names, source paths, SHA-256 hashes,
 and the catalog commit in `manifest.json`. This is reference matching, not training a
@@ -71,7 +86,7 @@ with 6 unavailable previews. This does not establish complete Classic drop cover
 Monster Book references can differ from your server and omit mesos/other drops.
 Periodic pickup still works for unrecognized items you walk over.
 
-## Compatibility and validation
+## Legacy importer validation
 
 A catalog pose, inventory icon or v83 map is not guaranteed to match Classic. Animation,
 semi-transparency, dropped-item rotation, spell effects and scaling can change pixels.

@@ -724,8 +724,8 @@ WIZARD_STEPS: List[WizardStep] = [
                "Click right on your own yellow dot on the zoomed-in minimap. "
                "A green circle shows where the bot sees you -- check it's on your dot."),
     WizardStep("mobs", "Mobs",
-               "Click Download sprites for this map to get its monster animation poses and known "
-               "drop icons. Drawing boxes is optional: add a screenshot example only when a pose is missed."),
+               "Click Download sprites for this map to get its monster poses and common pickup "
+               "icons from the configured client build. Drawing boxes is optional: add an example when a pose is missed."),
     WizardStep("player", "Your name tag",
                "Drag a tight box around the name tag under YOUR character -- the bot uses it to "
                "know exactly where you are. Just the name, not other players' tags."),
@@ -748,6 +748,17 @@ WIZARD_STEPS: List[WizardStep] = [
 ]
 
 PATROL_MIN_GAP = 0.05
+
+
+def setup_steps(include_supplies: bool = False):
+    """Six pages by default; the OCR supplies page is explicitly optional."""
+    screen = WizardStep("screen", "Game and HUD",
+                        "Click Detect game and UI, then click into the game during the countdown. "
+                        "Check the minimap, your green dot, and the HP/MP readings together. "
+                        "Correct any missed region using the dropdown, then click Next.")
+    keys = ["mobs", "player"] + (["supplies"] if include_supplies else []) + ["patrol", "keys", "summary"]
+    by_key = {step.key: step for step in WIZARD_STEPS}
+    return [screen] + [by_key[key] for key in keys]
 
 
 @dataclass
@@ -773,8 +784,9 @@ def step_index(key: str) -> int:
     raise KeyError(key)
 
 
-def step_label(i: int, map_name: Optional[str] = None) -> str:
-    text = f"Step {i + 1} of {len(WIZARD_STEPS)}: {WIZARD_STEPS[i].title}"
+def step_label(i: int, map_name: Optional[str] = None, steps=None) -> str:
+    steps = WIZARD_STEPS if steps is None else steps
+    text = f"Step {i + 1} of {len(steps)}: {steps[i].title}"
     return f"Setting up: {map_name} -- {text}" if map_name else text
 
 
@@ -898,6 +910,12 @@ def step_problem(key: str, ctx: WizardContext) -> Optional[str]:
     """Why the user can't go past this step yet (None = OK to continue)."""
     c = ctx.settings.calibration
     size = ctx.screenshot_size
+    if key == "screen":
+        for check in ("window", "screenshot", "minimap", "dot", "bars"):
+            problem = step_problem(check, ctx)
+            if problem:
+                return "Check Game and HUD: " + problem
+        return None
     if key == "window":
         if ctx.window_box is None:
             return "Click Find window first. The game must be open and not minimised."
@@ -940,9 +958,9 @@ def step_problem(key: str, ctx: WizardContext) -> Optional[str]:
     if key == "summary":
         probs = list(ctx.settings.problems())
         if ctx.n_mob_templates <= 0:
-            probs.append("No mob pictures saved (step 5)")
+            probs.append("No mob pictures saved; download map sprites or add an example")
         if not ctx.has_player_template:
-            probs.append("No name tag picture saved (step 6)")
+            probs.append("No name tag picture saved")
         return ("Not finished yet: " + "; ".join(probs) + ".") if probs else None
     return None
 

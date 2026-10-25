@@ -1,5 +1,5 @@
 """
-Setup wizard: one window, Back / Next, eleven steps (see ``logic.WIZARD_STEPS``).
+Setup wizard: six pages, with an optional seventh page for supply OCR.
 
 Everything the user selects on a screenshot is converted back to real game-client
 pixels by ``logic.View``. Mob / name-tag crops are written straight to
@@ -17,7 +17,7 @@ from typing import Callable, List, Optional
 from maplebot.settings import Profile, Settings
 
 from . import logic
-from .logic import WIZARD_STEPS, WizardContext
+from .logic import WizardContext
 from .widgets import (CYAN, GREEN, MAGENTA, ORANGE, RED, ImageCanvas, KeyPicker, Tooltip,
                       capture_game, file_thumbnail)
 
@@ -46,6 +46,9 @@ class SetupWizard(tk.Toplevel):
         self.ctx = WizardContext(settings=Settings.from_dict(settings.to_dict()))
         self.ctx.n_mob_templates = len(profile.mob_templates())
         self.ctx.has_player_template = profile.player_template() is not None
+        self.steps = logic.setup_steps(include_supplies=settings.ocr.enabled)
+        self._auto_regions_owned = {}
+        self.ui_detection = None
         # A map that was set up before keeps its patrol edges unless the user changes them
         # (per map: profile paths always point at the current map).
         map_set_up = _safe(profile.map_is_set_up, False)
@@ -102,7 +105,7 @@ class SetupWizard(tk.Toplevel):
         return self.ctx.settings
 
     def key(self) -> str:
-        return WIZARD_STEPS[self.step].key
+        return self.steps[self.step].key
 
     def info(self, text: str, colour: str = "#1a6e1a"):
         self.msg.config(text=text, foreground=colour)
@@ -112,10 +115,10 @@ class SetupWizard(tk.Toplevel):
 
     def show_step(self, i: int):
         self._stop_hud_preview()
-        self.step = max(0, min(i, len(WIZARD_STEPS) - 1))
-        st = WIZARD_STEPS[self.step]
-        self.step_lbl.config(text=logic.step_label(self.step, self.map_name))
-        self.dots.config(text="  ".join("●" if j <= self.step else "○" for j in range(len(WIZARD_STEPS))))
+        self.step = max(0, min(i, len(self.steps) - 1))
+        st = self.steps[self.step]
+        self.step_lbl.config(text=logic.step_label(self.step, self.map_name, self.steps))
+        self.dots.config(text="  ".join("●" if j <= self.step else "○" for j in range(len(self.steps))))
         self.instr.config(text=st.instruction)
         self.msg.config(text="")
         for w in self.body.winfo_children():
@@ -321,17 +324,93 @@ class SetupWizard(tk.Toplevel):
                      CAPTURE_COUNTDOWN_S, done)
 
     def _set_main_image(self, image):
-        old = self.ctx.screenshot_size
+        from .setup_detection import detect_screen
         self.image = image
-        h, w = image.shape[:2]
-        self.ctx.screenshot_size = (w, h)
-        self.s.calibration.reference_size = [w,h]
+        self.ui_detection = detect_screen(self.ctx, image, self._auto_regions_owned)
+        self._auto_regions_owned = self.ui_detection.owned
         self.session_boxes = []
         self._sprite_boxes = []             # matches belonged to the previous screenshot
-        if old and old != (w, h):
-            self.info(f"The game window size changed ({old[0]} x {old[1]} -> {w} x {h}). "
-                      "Draw the boxes again on this screenshot.", "#a05a00")
-        self._refresh_dot()
+        if self.ui_detection.resized:
+            self.info("Game size changed. Old screen regions were cleared and detected again; "
+                      "review the readings and reset your training edges.", "#a05a00")
+
+    # ------------------------------------------------------- combined Game/HUD
+    def _build_screen(self, f):
+        row = ttk.Frame(f)
+        row.pack(fill="x", pady=4)
+        ttk.Label(row, text="Game window:").pack(side="left")
+        self.title_var = tk.StringVar(value=self.s.calibration.window_title or "MapleStory")
+        ttk.Entry(row, textvariable=self.title_var, width=24).pack(side="left", padx=6)
+        ttk.Button(row, text="Detect game and UI", command=self._screen_capture).pack(side="left")
+        self.window_lbl = ttk.Label(f)
+        self.window_lbl.pack(anchor="w")
+        tools = ttk.Frame(f)
+        tools.pack(fill="x", pady=6)
+        ttk.Label(tools, text="Correct a region if needed:").pack(side="left")
+        self.screen_target = tk.StringVar(value="Minimap")
+        choice = ttk.Combobox(tools, textvariable=self.screen_target, state="readonly",
+                              values=["Minimap", "HP bar", "MP bar", "Your dot"], width=15)
+        choice.pack(side="left", padx=6)
+        choice.bind("<<ComboboxSelected>>", lambda _event: self._screen_target_changed())
+        self.supplies_var = tk.BooleanVar(value=any(s.key == "supplies" for s in self.steps))
+        ttk.Checkbutton(tools, text="Set up potion/meso OCR (optional)", variable=self.supplies_var,
+                        command=self._toggle_supplies).pack(side="left", padx=6)
+        self.canvas = ImageCanvas(f, self.canvas_w, self.canvas_h - 70)
+        self.canvas.pack()
+        self.canvas.on_box = self._screen_box
+        self.canvas.on_click = self._got_dot_click
+        self._screen_target_changed()
+        self.fill_lbl = ttk.Label(f, wraplength=self.canvas_w, justify="left")
+        self.fill_lbl.pack(anchor="w", pady=4)
+        self._redraw_screen()
+        if self.ctx.window_box:
+            self._show_window_box()
+        else:
+            self.after(200, lambda: self._find_window(quiet=True))
+
+    def _toggle_supplies(self):
+        self.steps = logic.setup_steps(include_supplies=bool(self.supplies_var.get()))
+        self.step_lbl.config(text=logic.step_label(self.step, self.map_name, self.steps))
+        self.dots.config(text="  ".join("●" if j <= self.step else "○" for j in range(len(self.steps))))
+
+    def _screen_target_changed(self):
+        self.canvas.mode = "click" if self.screen_target.get() == "Your dot" else "box"
+
+    def _screen_box(self, box):
+        target = self.screen_target.get()
+        field = {"Minimap": "minimap_box", "HP bar": "hp_bar_box", "MP bar": "mp_bar_box"}.get(target)
+        if target == "Minimap":
+            self._got_minimap(box)
+        elif target in {"HP bar", "MP bar"}:
+            self.bar_target.set("hp" if target == "HP bar" else "mp")
+            self._got_bar(box)
+        if field and box is not None and getattr(self.s.calibration, field) == list(box):
+            self._auto_regions_owned.pop(field, None)
+
+    def _screen_capture(self):
+        self._find_window()
+        if self.ctx.window_box is not None:
+            self.take_screenshot(lambda image: (self._set_main_image(image), self._redraw_screen()))
+
+    def _redraw_screen(self):
+        extra = []
+        if self.ctx.dot_pos is not None and self.s.calibration.minimap_box:
+            extra.append(("dot", logic.minimap_dot_to_image(self.s.calibration.minimap_box,
+                                                           self.ctx.dot_pos), GREEN))
+        self.canvas.overlays = self._overlays(extra)
+        self.canvas.show(self.image)
+        if self.image is None:
+            self.fill_lbl.config(text="Click Detect game and UI. No OCR installation is needed for HP/MP bars.")
+            return
+        from maplebot.perception.calib import bar_fill
+        c = self.s.calibration
+        hp, mp = bar_fill(self.image, c.hp_bar_box), bar_fill(self.image, c.mp_bar_box)
+        self.fill_lbl.config(text=f"HP: {logic.format_percent(hp)}   MP: {logic.format_percent(mp)}   "
+                            + ("Player dot found" if self.ctx.dot_pos is not None else "Player dot needs a click")
+                            + "\nCheck the colored boxes and green dot, then click Next. "
+                            "Use the dropdown to correct anything missed.")
+        if self.ui_detection and self.ui_detection.resized:
+            self.info("Game size changed: review the detected UI and reset your training edges.", "#a05a00")
 
     def _retake_button(self, parent, then: Callable[[], None]):
         def go():
@@ -398,7 +477,8 @@ class SetupWizard(tk.Toplevel):
 
     def _show_window_box(self):
         x, y, w, h = self.ctx.window_box
-        self.window_lbl.config(text=f"Found it: game area is {w} x {h} pixels. Click Next.",
+        action = "Detect game and UI captures it for setup." if self.key() == "screen" else "Click Next."
+        self.window_lbl.config(text=f"Found it: game area is {w} x {h} pixels. {action}",
                                foreground="#1a6e1a")
 
     # -------------------------------------------------------- 2. screenshot
@@ -436,6 +516,9 @@ class SetupWizard(tk.Toplevel):
         self._redraw_minimap()
 
     def _redraw_minimap(self):
+        if self.key() == "screen":
+            self._redraw_screen()
+            return
         self.canvas.overlays = self._overlays()
         self.canvas.show(self.image)
 
@@ -476,6 +559,11 @@ class SetupWizard(tk.Toplevel):
         if self.image is None or not c.minimap_box:
             return
         try:
+            if self.key() == "screen":
+                from .setup_detection import unique_player_dot
+                self.ctx.dot_pos = unique_player_dot(self.image, c.minimap_box,
+                                                     c.player_dot_hsv_low, c.player_dot_hsv_high)
+                return
             from maplebot.perception.calib import minimap_player_position
             self.ctx.dot_pos = minimap_player_position(self.image, c.minimap_box,
                                                        c.player_dot_hsv_low, c.player_dot_hsv_high)
@@ -507,6 +595,9 @@ class SetupWizard(tk.Toplevel):
         return [x - m, y - m, w + 2 * m, h + 2 * m]
 
     def _redraw_dot(self):
+        if self.key() == "screen":
+            self._redraw_screen()
+            return
         extra = []
         if self.ctx.dot_pos is not None:
             extra.append(("dot", logic.minimap_dot_to_image(self.s.calibration.minimap_box, self.ctx.dot_pos),
@@ -537,7 +628,7 @@ class SetupWizard(tk.Toplevel):
             c.player_dot_hsv_low, c.player_dot_hsv_high = list(lo), list(hi)
             self.ctx.dot_pos = pos
             self.info(f"Found you at {pos[0]:.2f} across the minimap (green circle). "
-                      "If the circle is on your yellow dot, click Next; otherwise click Try again.")
+                      "If the circle is on your yellow dot, click Next; otherwise click your dot again.")
         else:
             self._refresh_dot()       # keep the previous colours
             self.ctx.dot_pos = None
@@ -767,6 +858,9 @@ class SetupWizard(tk.Toplevel):
         self._redraw_bars()
 
     def _redraw_bars(self):
+        if self.key() == "screen":
+            self._redraw_screen()
+            return
         self.canvas.overlays = self._overlays()
         self.canvas.show(self.image)
         c = self.s.calibration

@@ -1,4 +1,10 @@
 {
+  "provider": "classic-world",
+  "classic_base": "https://maplestory.quest",
+  "classic_snapshot": "Release",
+  "classic_client_build": "1.0.0",
+  "classic_release_date": "2026-10-21",
+  "classic_common_items": ["Red Potion", "Orange Potion", "White Potion", "Blue Potion", "Mana Elixir", "Elixir", "Power Elixir", "Squishy Liquid", "Slime Bubble", "Snail Shell", "Blue Snail Shell", "Red Snail Shell", "Tree Branch", "Firewood", "Dark Stump Leaf", "Mushroom Spore", "Orange Mushroom Cap", "Pig's Ribbon", "Leather", "Stiff Feather", "Iron Ore", "Mithril Ore", "Bronze Ore", "Silver Ore", "Gold Ore", "Orihalcon Ore", "Adamantium Ore", "Steel Ore", "Arrows for Bows", "Arrows for Crossbows"],
   "catalog_repository": "andrenogrib/gms_v83_wztoweb",
   "catalog_revision": "58c0c763b2eb4a868e5aeb198e6ead3313f229df",
   "sprite_api": "https://maplestory.io/api/GMS/83",

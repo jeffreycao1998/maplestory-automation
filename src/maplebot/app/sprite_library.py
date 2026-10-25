@@ -26,7 +26,8 @@ class AssetError(RuntimeError):
     pass
 
 
-HOSTS = {"raw.githubusercontent.com", "maplestory.io"}
+HOSTS = {"raw.githubusercontent.com", "maplestory.io", "maplestory.quest"}
+SOURCE_CONFIG = REPO_ROOT / "configs/sprite-sources.yaml"
 
 
 def _url(url):
@@ -64,7 +65,7 @@ def _normalized(text):
     return re.sub(r"[^a-z0-9]", "", text.casefold())
 
 
-class SpriteLibrary:
+class LegacySpriteLibrary:
     def __init__(self, cache: Path, config: Path | None = None, cancelled=lambda: False):
         self.cache = Path(cache)
         self.config = _json(config or REPO_ROOT / "configs/sprite-sources.yaml")
@@ -143,6 +144,35 @@ class SpriteLibrary:
             rgba.save(target, format="PNG")
         return hashlib.sha256(target.read_bytes()).hexdigest()
 
+    def _download_sprites(self, requests, output, progress):
+        entries, failures = [], []
+        seen = set()
+        # Three concurrent requests, cached thereafter. All URLs are public asset IDs.
+        def acquire(request):
+            kind, mid, name, action, frame, url = request
+            return request, self._fetch(url, 4 * 1024 * 1024)
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = [pool.submit(acquire, request) for request in requests]
+            for n, (request, future) in enumerate(zip(requests, futures), 1):
+                self._check_cancelled()
+                kind, mid, name, action, frame, url = request
+                progress(f"Downloading sprites {n}/{len(requests)}: {name}…")
+                target = output / f"{kind}_library_{mid}_{action}_{frame}.png"
+                try:
+                    _, source = future.result()
+                    digest = self._png(source, target)
+                    if (kind, mid, digest) in seen:
+                        target.unlink()
+                        continue
+                    seen.add((kind, mid, digest))
+                    entries.append({"kind": kind, "id": mid, "name": name, "action": action,
+                                    "frame": frame, "file": target.name, "sha256": digest, "url": url})
+                except Exception as e:
+                    self._check_cancelled()
+                    target.unlink(missing_ok=True)
+                    failures.append(f"{name} {action}/{frame}: {e}")
+        return entries, failures
+
     def build_pack(self, map_id, output: Path, progress=lambda text: None):
         map_id = _id(map_id)
         self._check_cancelled()
@@ -211,31 +241,7 @@ class SpriteLibrary:
         except Exception as e:
             self._check_cancelled()
             warnings.append(f"Drop catalog unavailable: {e}")
-        seen = set()
-        # Three concurrent requests, cached thereafter. All URLs are public asset IDs.
-        def acquire(request):
-            kind, mid, name, action, frame, url = request
-            return request, self._fetch(url, 4 * 1024 * 1024)
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            futures = [pool.submit(acquire, request) for request in requests]
-            for n, (request, future) in enumerate(zip(requests, futures), 1):
-                self._check_cancelled()
-                kind, mid, name, action, frame, url = request
-                progress(f"Downloading sprites {n}/{len(requests)}: {name}…")
-                target = output / f"{kind}_library_{mid}_{action}_{frame}.png"
-                try:
-                    _, source = future.result()
-                    digest = self._png(source, target)
-                    if (kind, mid, digest) in seen:
-                        target.unlink()
-                        continue
-                    seen.add((kind, mid, digest))
-                    entries.append({"kind": kind, "id": mid, "name": name, "action": action,
-                                    "frame": frame, "file": target.name, "sha256": digest, "url": url})
-                except Exception as e:
-                    self._check_cancelled()
-                    target.unlink(missing_ok=True)
-                    failures.append(f"{name} {action}/{frame}: {e}")
+        entries, failures = self._download_sprites(requests, output, progress)
         missing_mobs = set(mobs) - {row["id"] for row in entries if row["kind"] == "mob"}
         if missing_mobs:
             raise AssetError("No usable sprites for: " + ", ".join(mobs[mid]["name"] for mid in missing_mobs)
@@ -246,6 +252,38 @@ class SpriteLibrary:
                     "validated_on_classic": False, "entries": entries, "warnings": warnings + failures}
         (output / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         return manifest
+
+
+def SpriteLibrary(cache: Path, config: Path | None = None, cancelled=lambda: False):
+    """Choose the explicitly configured edition. Never silently fall back to v83."""
+    config = config or SOURCE_CONFIG
+    value = _json(config)
+    provider = value.get("provider", "classic-world")
+    if provider == "classic-world":
+        from .classic_library import ClassicWorldLibrary
+        return ClassicWorldLibrary(cache, config, cancelled)
+    if provider == "legacy-v83":
+        return LegacySpriteLibrary(cache, config, cancelled)
+    raise AssetError("Unknown sprite provider; choose the matching client edition.")
+
+
+def compatible_manifest(manifest, config=None):
+    value = _json(config or SOURCE_CONFIG)
+    if value.get("provider", "classic-world") == "classic-world":
+        return (manifest.get("source_game") == "MapleStory Classic World"
+                and manifest.get("source_client_build") == value.get("classic_client_build")
+                and manifest.get("source_snapshot") == value.get("classic_snapshot"))
+    return (value.get("provider") == "legacy-v83"
+            and manifest.get("catalog_repository") == value.get("catalog_repository")
+            and manifest.get("catalog_revision") == value.get("catalog_revision"))
+
+
+def source_caption(config=None):
+    value = _json(config or SOURCE_CONFIG)
+    if value.get("provider", "classic-world") == "classic-world":
+        return (f"Classic World {value['classic_client_build']} · {value['classic_snapshot']} snapshot\n"
+                "Community client-file extraction, not an official Nexon API. Check Observe only before keys.")
+    return "Legacy GMS v83 references — not the current Classic World client."
 
 
 def install_pack(pack: Path, templates: Path):

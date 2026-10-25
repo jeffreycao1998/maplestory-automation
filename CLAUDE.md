@@ -8,7 +8,7 @@ Start: one map, one ranged skill. Grow from there.
 | Setting | Value |
 |---|---|
 | OS | Windows (bot runs on the user's PC; Claude's sandbox is Linux) |
-| Server | _TBD (official Classic or private)_ |
+| Server | Official Global MapleStory Classic World, Grand Launch 21 October 2026; not legacy GMS v83 |
 | Game resolution / mode | 1366×768 windowed — never moved or resized during a run |
 | Class / skill | Magician (level ~13), Magic Claw. MP is the bottleneck — MP potions matter |
 | Keybinds | attack: _TBD_, jump: _TBD_, move: arrow keys |
@@ -57,6 +57,9 @@ system and only edit files inside their area.
   popup, disconnect, low detection confidence).
 - No anti-cheat evasion, memory reading, injection, or client modification.
 - Keep `config` values in YAML under `configs/`, not hard-coded.
+- Match game data to the Classic World client build in `configs/sprite-sources.yaml`.
+  Legacy GMS v83 IDs, drops and map geometry are not authoritative for this release.
+  Community-extracted client data is reference material, not live validation.
 
 ## Commands
 - Tests: `pytest`

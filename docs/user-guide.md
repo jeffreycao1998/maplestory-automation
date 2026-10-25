@@ -63,27 +63,36 @@ Future updates use the button.
 - Make sure the **minimap is open**. It's the small map in the top-left corner.
 - **Don't move or resize the game window** after setup. If you do, run the wizard again.
 
-## 5. The setup wizard, step by step
+## 5. The six-page setup wizard
 
-The wizard has **Back** and **Next** buttons. Next tells you what's missing if a step
-isn't done yet.
+1. **Game and HUD.** Click **Detect game and UI**, then click into the game during the
+   three-second countdown. The app finds the minimap, your yellow dot, and the complete
+   HP/MP bar frames from the screenshot. Check the colored boxes, green dot and fill
+   percentages together, then click Next. Use the correction dropdown if something is
+   missed. HP/MP bar setup does **not** require the optional OCR package.
+2. **Mobs.** Click **Download sprites for this map…** and choose the game's map name.
+   The default source is now a community extraction labeled **Classic World 1.0.0,
+   Release**, not GMS v83. It downloads that map's actual release monster poses and a
+   common pickup-icon set. Manual mob boxes are optional. Read [source limits](assets.md).
+3. **Your name tag.** Save a tight example of the name under your own character, so
+   another player's character cannot become the attack origin. Existing saved names
+   can be kept when setting up another map with the same character.
+4. **Training area.** Set the left and right edges of one known safe platform. Existing
+   setup can be kept for a previously calibrated map. Map data never silently enables
+   unverified movement routes.
+5. **Keys.** Set your attack, jump and potion keys and review your skill's reach and
+   timing. These are your bindings; the app cannot infer changed in-game keybindings.
+6. **Done.** Review and Save, then try **Observe only** before enabling game keys.
 
-Whenever the wizard takes a screenshot, it **hides for 3 seconds** and a countdown
-appears in the bottom-right corner. During those 3 seconds, **click on the game** so
-it's in front and nothing covers it.
+**Potion/meso OCR is optional.** Select **Set up potion/meso OCR (optional)** on the first
+page to add a seventh page for visible stock and wallet regions. Skip it to complete
+basic setup without installing OCR. This is separate from reading HP/MP bar fill.
 
-| Step | What to do | Tips |
-|---|---|---|
-| 1. Game window | The title is usually already right ("MapleStory"). Click **Find window**. You should see "Found it: game area is 1366 x 768". | If it can't find the window, check that the game isn't minimised. A private server's window may have a different name, so type part of it. |
-| 2. Screenshot | Click **Take screenshot**, then click on the game. | Stand somewhere with a monster or two on screen. Steps 3 to 7 all use this picture. |
-| 3. Minimap | **Drag a box** around the minimap. A cyan box shows what you picked. | Include the whole map area but not its title bar. Drag again to redo it. |
-| 4. Your dot | The minimap is shown zoomed in. **Click your own yellow dot.** A green circle shows where the bot sees you. | Don't click party members' orange dots. If the circle isn't on your dot, click **Try again**. |
-| 5. Mobs | Click **Download sprites for this map…**, select the game's map name, then **Download and use these sprites**. Continue with Next; mob boxes are optional. | Downloaded animation poses and drop icons are saved for this map. Green boxes show sprite matches. Use **Observe only** before enabling keys. If a pose is missed, you can optionally add a tight screenshot example. |
-| 6. Your name tag | Drag a tight box around the **name tag under YOUR character**. The bot uses it to know exactly where you are. **This step is required**: without it, the bot only guesses your position and won't attack. | Box just your name, not other players' tags or your guild name. If you change characters, redo this step. |
-| 7. HP and MP bars | Pick **HP bar** and drag along the red bar. **This one is required**: the bot uses it to stop before your character dies. Then do the same for the blue **MP bar**. The wizard shows how full it reads each bar, e.g. "HP reads 43% full". | The MP bar is optional but **strongly recommended for magicians**: you run out of MP fast, and without it the bot can't drink MP potions. Check the numbers roughly match the game. |
-| 8. Training area | Walk your character to the **left end** of where it should train. Click **Set left** and click the game during the countdown. Then walk to the **right end** and click **Set right**. The wizard also records how high that bridge is on the minimap. | **Pick one bridge, set both edges on that same bridge, a little in from its ends.** On maps like The Tree That Grew II, with a stack of sagging rope bridges, the wizard warns "those two spots look like different bridges" if your two readings are at different heights. You can fine-tune both numbers in the boxes (0 = far left of the minimap, 1 = far right). |
-| 9. Keys | Click **Press a key**, then press your **attack skill** key. Do the same for **jump**, and optionally your **HP** and **MP potion** keys. You can also choose from the dropdown. Then set the skill's **reach** with the slider and the **time between casts**. | Magic Claw is about **0.6–0.7 s** between casts. Start with a slightly short reach and check it in the live preview. Each key must be different. |
-| 10. Done | Check the summary and click **Save**. | You can change anything later in **Settings**, or run the wizard again. |
+The first page uses visual evidence, not blindly scaled fixed coordinates. The bottom
+HUD is usually consistent for a given client layout, but screen size, UI scaling and
+customized windows can change its placement. Saved manual regions are preserved at the
+same screen size. A size change clears old pixel regions and asks you to review detected
+regions and reset training edges. Ambiguous player dots require a click on your own dot.
 
 ## 6. Running the bot
 
@@ -156,7 +165,7 @@ shared by all of them.
 |---|---|
 | The bot runs but **keys do nothing** in the game, or "Can't press keys in the game" | Close MapleBot and start it with **`start.bat`**, clicking **Yes** to the admin question. The main window shows a red warning when it's not running as admin. Also click into the game after pressing Start. |
 | **"Can't see your character"** and it pauses | The yellow dot wasn't found. Is the minimap open? Did the window move? Run the wizard again (steps 2 to 4). |
-| **No mobs detected** (no orange boxes) | Add more mob pictures in the wizard (step 5), with tight boxes and different poses. Or lower **Mob match strictness** in Settings → Detection (try 0.6). |
+| **No mobs detected** (no orange boxes) | Download the correct Classic World pack on the **Mobs** page, then check Observe only. You can add a screenshot example for a missed pose. Do not force unrelated scenery to match by lowering thresholds blindly. |
 | It finds things that **aren't monsters** | Raise **Mob match strictness** a little (try 0.75), and redo mob pictures with tighter boxes. |
 | It **attacks monsters on other platforms** | Lower **Up/down tolerance** in Settings → Attack skill. |
 | It **walks off the edge** | Run step 8 again, or nudge **Patrol left/right edge** inward in Settings → Screen setup. |
@@ -168,7 +177,7 @@ shared by all of them.
 | **Potions aren't used** | Set the HP/MP bar boxes (wizard step 7) and the potion keys (step 9). |
 | **"Those two spots look like different bridges"** | You set the left and right edges on different bridges. Redo step 8, standing on the same bridge both times. Both ends of one bridge are at the same height, so this check is strict (**Platform tolerance above** in Settings → Screen setup). |
 | It thinks it **fell off the platform** while it's still on the bridge | Raise **Platform tolerance below** a little (Settings → Screen setup). Bridges sag in the middle. |
-| It **patrols but never attacks** | It can't find your name tag. Redo wizard step 6 with a tight box around just your name. In the preview, your circle should be **green**, not amber. |
+| It **patrols but never attacks** | Check **Your name tag** in setup. Save a tight box around your own name. In the preview, your circle should be **green**, not amber. |
 | The app **doesn't open** at all | Run `start.bat` again. It shows the error in a black window if the app can't start. If installing failed, delete the `.venv` folder and run `start.bat` again. |
 
 **Logs:** click **Open logs folder** in the main window. `app.log` has the app's messages,

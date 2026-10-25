@@ -25,7 +25,13 @@ def png(path, color):
 
 @pytest.fixture
 def library(tmp_path, monkeypatch):
-    lib = S.SpriteLibrary(tmp_path / "cache")
+    # Keep explicit legacy regression coverage; it is no longer the app default.
+    config = json.loads(S.SOURCE_CONFIG.read_text())
+    config["provider"] = "legacy-v83"
+    path = tmp_path / "legacy-source.json"
+    path.write_text(json.dumps(config))
+    monkeypatch.setattr(S, "SOURCE_CONFIG", path)
+    lib = S.LegacySpriteLibrary(tmp_path / "cache", path)
     catalog = {
         "Map/map-links.json": {"maps": {"101010101": {"mapId": "101010101",
             "mapName": "The Tree That Grew II", "streetName": "Victoria Road",

@@ -418,6 +418,9 @@ class Profile:
             return []
         try:
             value = json.loads(record.read_text(encoding="utf-8"))
+            from .app.sprite_library import compatible_manifest
+            if not compatible_manifest(value):
+                return []                     # old v83 banks are not current Classic World data
             bank_id = value["bank"]
             if not re.fullmatch(r"[0-9a-f]{32}", bank_id):
                 return []

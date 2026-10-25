@@ -9,7 +9,7 @@ import threading
 import tkinter as tk
 from tkinter import ttk
 
-from .sprite_library import SpriteLibrary, install_pack
+from .sprite_library import SpriteLibrary, install_pack, source_caption
 
 
 class SpriteDownloadWindow(tk.Toplevel):
@@ -29,7 +29,7 @@ class SpriteDownloadWindow(tk.Toplevel):
         outer = ttk.Frame(self, padding=12)
         outer.pack(fill="both", expand=True)
         ttk.Label(outer, text="Choose the game's map name or numeric map ID.\n"
-                  "Download its monsters' animation poses and known drop icons; no boxes needed.",
+                  "Download its monsters' animation poses and common pickup icons; no boxes needed.",
                   wraplength=520).pack(anchor="w")
         row = ttk.Frame(outer)
         row.pack(fill="x", pady=8)
@@ -45,8 +45,7 @@ class SpriteDownloadWindow(tk.Toplevel):
         self.download_btn.state(["disabled"])
         self.message = ttk.Label(outer, text="Search by map name to begin.", wraplength=520, justify="left")
         self.message.pack(anchor="w")
-        ttk.Label(outer, text="Sources: GMS v83 catalog + maplestory.io. Classic can differ.\n"
-                  "Check the highlighted matches, then use Observe only before enabling keys.",
+        ttk.Label(outer, text=source_caption(),
                   foreground="#777777", wraplength=520).pack(anchor="w", pady=(8, 0))
         ttk.Button(outer, text="Close / cancel", command=self.close).pack(anchor="e", pady=(8, 0))
         self.protocol("WM_DELETE_WINDOW", self.close)
@@ -133,6 +132,9 @@ class SpriteDownloadWindow(tk.Toplevel):
                         text = (f"Installed {mobs} monster poses and {items} drop icons. "
                                 f"Found {len(detected)} matches in this screenshot.\n"
                                 "Close this window and click Next; drawing boxes is optional.")
+                        if manifest.get("source_client_build"):
+                            text += (f"\nSource: Classic World {manifest['source_client_build']} "
+                                     f"({manifest['source_snapshot']}). Common icons are not verified drop tables.")
                         if manifest["warnings"]:
                             text += "\nSome assets are unavailable: " + "; ".join(manifest["warnings"][:3])
                         self.message.config(text=text)

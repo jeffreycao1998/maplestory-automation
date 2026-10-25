@@ -18,7 +18,9 @@ contains local models. The app performs inference locally and disables ONNX tele
 it does not upload screenshots. If the optional dependency is missing, enabling OCR
 produces a setup error rather than silently pretending stock is known.
 
-In the setup wizard, **Visible supplies** is an optional step after HP/MP bars. Draw a
+The six-page wizard detects HP/MP bars from screen pixels without any OCR dependency.
+On **Game and HUD**, select **Set up potion/meso OCR (optional)** to add the
+**Visible supplies** page after character identification. Draw a
 tight box around the complete number on each potion shortcut, excluding its icon/key
 label. Also box the meso balance (open the relevant panel if needed) and optionally the
 notification area where inventory-full messages appear. Click **Test OCR**, compare the

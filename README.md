@@ -1,6 +1,6 @@
 # maplestory-automation
 
-Screen-reading training automation for a magician in MapleStory Classic.
+Screen-reading training automation for a magician in Global MapleStory Classic World.
 It looks at the game window and presses keys — nothing else.
 
 **Status:** screen perception, replay tests, supervised controls and configurable navigation.
@@ -10,8 +10,11 @@ See [OCR, Observe mode, ladders, learning and economy](docs/reliability.md),
 [movement and looting setup](docs/navigation.md) and [bulk sprite/map import](docs/assets.md).
 ZIP installations can [update from the app](docs/updating.md) after installing a copy
 with the **Check for updates** button.
-The Mobs setup step can download a map's monster animation poses and drop icons;
-manual mob boxes are optional. This reference matcher still misses some covered mobs.
+Setup has six pages: one detection/review page for the game window, minimap, player dot
+and HP/MP bars, then monsters, your name tag, training area, keys and review. Potion/meso
+OCR adds an optional seventh page. HP/MP bar detection does not need the OCR package.
+Monster downloads now target a community Classic World 1.0.0 release snapshot, not
+legacy GMS v83. Manual mob boxes are optional; covered mobs can still be missed.
 The historical phase checklist is in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Layout

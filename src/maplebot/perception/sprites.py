@@ -2,10 +2,23 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import cv2
 import numpy as np
 
 from maplebot.types import Mob
+
+
+def interleave_references(paths):
+    """Give every catalogued species an early pose within the per-tick budget."""
+    groups = {}
+    for path in paths:
+        path = Path(path)
+        match = re.match(r"mob_(?:library|catalog)_([0-9]+)(?:_|\.)", path.name)
+        group = match.group(1) if match else str(path)
+        groups.setdefault(group, []).append(path)
+    return [rows[i] for i in range(max(map(len, groups.values()), default=0))
+            for rows in groups.values() if i < len(rows)]
 
 
 class SpriteMatcher:
