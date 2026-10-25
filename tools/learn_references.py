@@ -47,6 +47,7 @@ def evaluate(frames, settings, template_dir, player_template=None):
     totals={role:{'tp':0,'fp':0,'fn':0} for role in ('mob','item')}
     settings=Settings.from_dict(settings.to_dict())
     settings.ocr.enabled=False
+    settings.training_only=False  # Detector evaluation includes labeled drops.
     settings.detection.sprite_templates_per_tick=max(128,len(list(template_dir.glob("mob_*.png"))),len(list(template_dir.glob("item_*.png"))))  # exhaustive evaluation, not a live budget
     per=Perceiver(settings,list(template_dir.glob('mob_*.png')),player_template,list(template_dir.glob('item_*.png')))
     try:

@@ -85,6 +85,7 @@ def simulate(seed: int = 1, duration_s: float = 60.0, hz: float = 15.0,
     player over it. `miss_rate` = chance per frame that a visible mob is not detected."""
     rng = random.Random(seed)
     s = settings or Settings()
+    s.skill.targeting_profile = "generic"
     bl, br = bridge
     bc, bh = (bl + br) / 2, (br - bl) / 2
 

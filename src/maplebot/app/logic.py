@@ -273,6 +273,8 @@ SECTION_LABELS = {
 # (section, field) -> (label, tooltip). Fields missing here still appear, with a
 # label made from the field name, so new settings never get lost.
 FIELD_INFO: Dict[Tuple[str, str], Tuple[str, str]] = {
+    ("general", "training_only"): ("Training only (pet handles loot)", "Skip manual pickup and drop pursuit, including old saved loot settings. Keep potions, retreat and navigation active."),
+    ("skill", "targeting_profile"): ("Skill targeting profile", "magic_claw applies the Classic 300-range cap and conservative platform/height checks. generic uses manually calibrated range and vertical tolerance."),
     ("ocr","enabled"): ("Read visible stock and wallet", "Requires the local OCR extra and tested HUD crops. Unreadable configured stock stops ordinary actions."),
     ("economy","hp_replacement_cost"): ("HP potion replacement cost", "Meso value per potion stock decrease; empty means unknown. This is a valuation, not a recorded purchase."),
     ("economy","mp_replacement_cost"): ("MP potion replacement cost", "Used to estimate net wallet change after valuing consumed stock; empty means unknown."),
@@ -297,7 +299,7 @@ FIELD_INFO: Dict[Tuple[str, str], Tuple[str, str]] = {
     ("keys", "mp_potion"): ("MP potion key", "Key your MP potions are on. Leave empty to not use MP potions."),
     ("skill", "hold_s"): ("Hold attack key for (seconds)", "How long the attack key is held down for each cast. 0.1 works for most skills."),
     ("skill", "cooldown_s"): ("Time between casts (seconds)", "Minimum gap between two casts -- the length of the cast animation. Magic Claw: about 0.6-0.7 s. Energy Bolt: about 0.7 s."),
-    ("skill", "range_px"): ("Skill reach (pixels)", "How far left/right of you the skill hits, in screen pixels. Mobs further than this are walked towards first."),
+    ("skill", "range_px"): ("Skill reach (pixels)", "Requested horizontal reach in screen pixels. The Magic Claw profile caps this at 300; farther compatible targets are approached first."),
     ("skill", "vertical_tolerance_px"): ("Up/down tolerance (pixels)", "Mobs further above or below you than this are ignored (they're on another platform). Lower it if the bot attacks mobs it can't reach."),
     ("calibration", "window_title"): ("Game window title", "Text in the game window's title bar. 'MapleStory' works for most clients."),
     ("calibration", "minimap_box"): ("Minimap box (x, y, width, height)", "Where the minimap is inside the game window. Easiest to set with the setup wizard."),

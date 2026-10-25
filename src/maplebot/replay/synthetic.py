@@ -507,6 +507,7 @@ def settings_for_scene(truth: dict, base: Optional[Settings] = None) -> Settings
     s = Settings.from_dict(base.to_dict()) if base is not None else Settings()
     c = s.calibration
     c.map_reference = None  # Synthetic minimaps use viewport coordinates.
+    s.skill.targeting_profile = "generic"  # Synthetic actors are not Classic hitbox evidence.
     if truth.get("minimap_box") is not None:
         c.minimap_box = [int(v) for v in truth["minimap_box"]]
     if truth.get("hp_bar_box") is not None:

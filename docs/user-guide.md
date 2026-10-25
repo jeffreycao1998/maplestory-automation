@@ -225,3 +225,24 @@ client area so a wrong window or changed geometry can be diagnosed.
 Opening the activity window or another app while playing can pause input again.
 Close the log, return to the game and resume when ready. Observe only displays
 proposed decisions and never presses keys or activates the game.
+
+## Training only and Magic Claw targeting
+
+**Training only (pet handles loot)** is on by default, including when loading an older
+setup. The bot skips manual pickup, chasing drops and drop-image matching. It still
+uses potions and follows navigation/retreat safeguards. You do not need a pet yet for
+this mode; drops can simply remain on the floor. Manual loot settings are retained
+for an explicit future opt-in by turning Training only off.
+
+The default **Magic Claw** targeting profile caps reach at 300, even if an old setup
+requested 350. It checks the current name-tag position, facing, cast lock, vertical
+alignment and estimated floor height before attacking. With an aligned source map,
+it follows the current platform's slope and rejects targets better explained by
+another platform. Without source geometry it uses a conservative sprite-foot-height
+comparison. A monster directly below you is not automatically a valid target because
+its horizontal position is close.
+
+The activity log explains rejected platform/height targets. The green preview box is
+only a range guide, not a verified engine hitbox. Exact vertical targeting rules are
+not exposed by the inspected release data; these conservative checks can skip valid
+cross-platform shots. See [research and limits](../reports/training-and-magic-claw-validation.md).

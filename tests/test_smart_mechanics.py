@@ -145,7 +145,7 @@ def test_predictive_edge_braking_and_damage_recovery():
 
 
 def test_loot_picks_up_between_fights_and_bounds_uncollectable_drops():
-    s=Settings();s.loot.max_attempts=2
+    s=Settings();s.training_only=False;s.loot.max_attempts=2
     b=Behavior(s,MapModel.from_settings(s))
     item=Item(410,425,20,20,.99,'mesos.png')
     mob=Mob(450,400,30,30,.99,'slime.png')
@@ -157,7 +157,7 @@ def test_loot_picks_up_between_fights_and_bounds_uncollectable_drops():
 
 
 def test_loot_does_not_chase_another_floor_or_past_edge():
-    s=Settings();b=Behavior(s,MapModel.from_settings(s))
+    s=Settings();s.training_only=False;b=Behavior(s,MapModel.from_settings(s))
     p=perception(x=.69,items=[Item(700,425,20,20,.99,'coin')])
     d=b.decide(p,0)
     assert d.action!=A.WALK_RIGHT
@@ -169,7 +169,7 @@ def test_loot_does_not_chase_another_floor_or_past_edge():
 
 
 def test_low_confidence_beats_loot_navigation_and_potions():
-    s=navigation_settings();s.loot.enabled=True;s.keys.hp_potion='a'
+    s=navigation_settings();s.loot.enabled=True;s.training_only=False;s.keys.hp_potion='a'
     b=Behavior(s,MapModel.from_settings(s))
     p=replace(perception(hp=.3,items=[Item(410,425,20,20,1,'coin')]),confidence=.4)
     assert b.decide(p,0).state=='WAIT'
@@ -201,7 +201,7 @@ def test_alpha_sprites_match_over_different_backgrounds_and_ignore_ui(tmp_path):
     # Imported item sprites are wired into Perception, with UI exclusions and body-to-feet offset.
     tag=rng.integers(0,255,(10,20,3),dtype=np.uint8);tag_path=tmp_path/'player.png';cv2.imwrite(str(tag_path),tag)
     image[100:110,80:100]=tag
-    s=Settings();s.detection.player_tag_offset_px=58
+    s=Settings();s.training_only=False;s.detection.player_tag_offset_px=58
     p=Perceiver(s,[],tag_path,[path]).perceive(Frame(image,0,(0,0,200,160)))
     assert len(p.items)==1 and not p.player_screen_estimated
 
@@ -294,3 +294,33 @@ def test_slow_observation_rate_does_not_reset_stuck_navigation_deadline():
     for t in (0,.7,1.4,2.1,2.8,3.5,4.2):
         assert b.decide(perception(x=.3),t).state=='NAV_APPROACH'
     assert b.decide(perception(x=.3),5.1).state=='NAV_FAILED'
+
+
+@pytest.mark.parametrize('tick_s',[.1,.5,1.0])
+def test_fallback_pickup_cannot_starve_patrol_at_slow_capture_rates(tick_s):
+    s=Settings();s.loot.enabled=True;s.training_only=False
+    b=Behavior(s,MapModel.from_settings(s))
+    backend=FakeBackend()
+    actions=[]
+    with Controller(s,backend,sleep=lambda _:None) as controller:
+        for i in range(8):
+            # Actual forward progress, on the same platform, without visible drops.
+            p=perception(x=.4+i*.01)
+            d=b.decide(p,i*tick_s);actions.append(d)
+            controller.execute(d.action,i*tick_s)
+            assert s.keys.right in backend.held
+    assert actions[0].action==A.WALK_RIGHT
+    assert any(d.state=='PATROL' for d in actions[1:])
+    assert not any(a.state==c.state=='LOOT_SWEEP' for a,c in zip(actions,actions[1:]))
+    assert not backend.held
+
+
+def test_fallback_sweep_does_not_hide_stuck_patrol_or_steal_a_route_launch():
+    s=Settings();b=Behavior(s,MapModel.from_settings(s))
+    assert b.decide(perception(),0).action==A.WALK_RIGHT
+    decisions=[b.decide(perception(),t) for t in (1,2,3)]
+    assert any(d.state=='STUCK' for d in decisions)
+    s=navigation_settings();s.loot.enabled=True;s.training_only=False
+    b=Behavior(s,MapModel.from_settings(s))
+    d=b.decide(perception(x=.5,y=.7),0)
+    assert d.state=='NAV_LAUNCH' and d.action==A.JUMP_UP

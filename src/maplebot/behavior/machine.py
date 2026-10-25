@@ -107,6 +107,8 @@ class Behavior:
         self._stuck_ref: Optional[Tuple[float, float]] = None   # (x, t) last movement
         self._navigation = Navigation(self.settings, self.map)
         self._style = PlayTiming(self.settings)
+        from .targeting import SkillTargeting
+        self._targeting = SkillTargeting(self.settings,self.map)
         self._retreat.settled_since = None
         self._retreat.last_position = None
         self._motion = None
@@ -115,6 +117,7 @@ class Behavior:
         self._last_hp = None
         self._hit_until = -math.inf
         self._last_pickup = -math.inf
+        self._last_was_sweep = False
         self._loot_target = None
         self._loot_started = None
         self._loot_seen = -math.inf
@@ -131,6 +134,8 @@ class Behavior:
         self._navigation = Navigation(settings, new_map)
         self._retreat.settings = settings
         self._style = PlayTiming(settings)
+        from .targeting import SkillTargeting
+        self._targeting = SkillTargeting(settings,self.map)
 
     def decide(self, p: Perception, now: float) -> Decision:
         x = self._map_x(p)
@@ -161,6 +166,7 @@ class Behavior:
             self._navigation.approach = (self._navigation.approach[0], now)
         if self._retreat.reason:
             d = replace(d, retreat_reason=self._retreat.reason)
+        self._last_was_sweep = d.state == "LOOT_SWEEP"
         self._apply(d.action, x, now)
         return d
 
@@ -271,6 +277,16 @@ class Behavior:
                 and now - self._stuck_ref[1] >= self.settings.behavior.stuck_s):
             return Decision(Action.JUMP, "STUCK", target,
                             f"not moving for {now - self._stuck_ref[1]:.1f}s, jump")
+        # A blind sweep is an occasional tap during an established walk, never a
+        # substitute for starting/turning patrol, route planning or stuck recovery.
+        # Always yield the next decision, even if one frame takes longer than the
+        # pickup interval. PICKUP preserves the controller's held movement key.
+        if (not self.settings.training_only and self.settings.loot.enabled and self.settings.keys.pickup and
+                p.player_map is not None and self.map.on_platform(*p.player_map) and
+                not self._last_was_sweep and
+                now - self._last_pickup >= self.settings.loot.pickup_interval_s):
+            return Decision(Action.PICKUP, "LOOT_SWEEP", target,
+                            f"Collect nearby drops while continuing patrol {want}")
         return Decision(Action.IDLE, "PATROL", target, f"walking {want}: {reason}")
 
     # ------------------------------------------------------------------ helpers
@@ -297,9 +313,7 @@ class Behavior:
         pos = self._player_xy(p)
         if pos is None:
             return []
-        py = pos[1]
-        tol = self.settings.skill.vertical_tolerance_px
-        return [m for m in p.mobs if abs(m.y - py) <= tol]
+        return [m for m in p.mobs if self._targeting.compatible(p,m)]
 
     def _pick_target(self, p: Perception, now: float) -> Optional[Mob]:
         """Nearest in-range mob by |dx|, with hysteresis: the nearest mob on the side we
@@ -310,7 +324,7 @@ class Behavior:
         if pos is None:
             return None
         px = pos[0]
-        rng = self.settings.skill.range_px
+        rng = self._targeting.range_px
         in_range = [m for m in self._same_row(p) if abs(m.x - px) <= rng]
         if not in_range:
             return None
@@ -321,6 +335,8 @@ class Behavior:
         # The nearest mob ahead may just have flickered out of detection: keep it as a
         # candidate for TURN_HOLD_S so one missed frame doesn't spin us around.
         held = self._held_ahead(now)
+        if held is not None and not self._targeting.compatible(p,held):
+            held = None
         if ahead:
             best_ahead = min(ahead, key=key)
             if (held is not None and abs(held.x - px)
@@ -352,9 +368,10 @@ class Behavior:
             toward = _side(dx)
             if dx != 0 and toward != self._edge_block:
                 return toward, f"approach mob {abs(dx)}px {toward}", mob
+        note=self._targeting.rejection_note(p)
         if self.walking:
-            return self.walking, "patrolling", None
-        return self._patrol_dir, f"start patrol {self._patrol_dir}", None
+            return self.walking, 'patrolling'+('; '+note if note else ''), None
+        return self._patrol_dir, f"start patrol {self._patrol_dir}"+('; '+note if note else ''), None
 
     def _approach_target(self, p: Perception, now: float) -> Optional[Mob]:
         """Nearest visible same-row mob, with the same hysteresis as targeting: keep
@@ -506,12 +523,12 @@ class Behavior:
         loot = self.settings.loot
         if pos is not None and any(abs(it.x - pos[0]) <= loot.range_px and
                 abs(it.y - pos[1] - loot.player_feet_offset_px) <= loot.floor_tolerance_px for it in p.items):
-            return self._rule_loot(p, now, allow_sweep=False)
+            return self._rule_loot(p, now)
         return None
 
-    def _rule_loot(self, p, now, allow_sweep=True):
+    def _rule_loot(self, p, now):
         loot = self.settings.loot
-        if not loot.enabled or not self.settings.keys.pickup or not self.map.on_platform(*p.player_map):
+        if self.settings.training_only or not loot.enabled or not self.settings.keys.pickup or not self.map.on_platform(*p.player_map):
             return None
         self._loot_ignored = [(pos, until) for pos, until in self._loot_ignored if now < until]
         pos = self._player_xy(p)
@@ -546,8 +563,6 @@ class Behavior:
                                 "LOOT", reason="Approach same-floor drop")
         elif now - self._loot_seen > min(1.5, loot.pursuit_s):
             self._loot_target = None
-        if allow_sweep and now - self._last_pickup >= loot.pickup_interval_s:
-            return Decision(Action.PICKUP, "LOOT_SWEEP", reason="Collect nearby drops while patrolling")
         return None
 
     def _rule_retreat(self, p, now):

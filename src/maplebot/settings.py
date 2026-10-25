@@ -60,7 +60,8 @@ class Skill:
     hold_s: float = 0.10       # how long to hold the attack key
     cooldown_s: float = 0.65   # minimum gap between casts (cast animation length)
     animation_lock_s: float = 0.65  # movement/jump lock after casting; tune for the skill
-    range_px: int = 350        # horizontal reach on screen
+    targeting_profile: str = "magic_claw"
+    range_px: int = 300        # horizontal reach on screen
     vertical_tolerance_px: int = 60   # ignore mobs further above/below than this
 
 
@@ -213,6 +214,7 @@ class Settings:
     ocr: OCR = field(default_factory=OCR)
     economy: Economy = field(default_factory=Economy)
     debug_preview: bool = True
+    training_only: bool = True
 
     # ---- helpers --------------------------------------------------------
     def to_dict(self) -> dict:
@@ -237,6 +239,10 @@ class Settings:
     def problems(self) -> List[str]:
         """Things that must be set before the bot can start (shown in the GUI)."""
         out = self.mechanics_problems()
+        if type(self.training_only) is not bool:
+            out.append('Training only must be on or off')
+        if self.skill.targeting_profile not in ('magic_claw','generic'):
+            out.append('Skill targeting profile must be magic_claw or generic')
         if not self.calibration.minimap_box:
             out.append("Minimap not calibrated")
         if not (0.0 <= self.calibration.patrol_left < self.calibration.patrol_right <= 1.0):
@@ -344,7 +350,7 @@ class Settings:
                      for name in ("attack", "jump", "left", "right", "up", "down", "pickup", "hp_potion", "mp_potion")
                      if getattr(self.keys, name)]
             for name in ("up", "down", "pickup"):
-                if name == "pickup" and not self.loot.enabled:
+                if name == "pickup" and (self.training_only or not self.loot.enabled):
                     continue
                 value = next((v for n, v in binds if n == name), None)
                 if value and any(v == value and n != name for n, v in binds):

@@ -341,7 +341,7 @@ class Perceiver:
                                [b for b in (minimap_box, hp_box, mp_box) if b is not None])
 
         items = ()
-        if self._items is not None and self._items._prepared:
+        if not self.settings.training_only and self._items is not None and self._items._prepared:
             matches = self._items._find_mobs(img, small if small is not None else gray,
                 float(det.item_threshold), [b for b in (minimap_box, hp_box, mp_box) if b is not None],
                 include_sprites=False)
@@ -359,7 +359,7 @@ class Perceiver:
             if self.player_template_configured:
                 flags.add(Flag.PLAYER_OFFSCREEN)
 
-        if self._items is not None and self._items._sprites.templates and not estimated:
+        if not self.settings.training_only and self._items is not None and self._items._sprites.templates and not estimated:
             loot = self.settings.loot
             feet = player_screen[1] + loot.player_feet_offset_px
             y0, y1 = max(0, feet-loot.floor_tolerance_px-32), min(h, feet+loot.floor_tolerance_px+32)

@@ -1,0 +1,13 @@
+{
+  "skill_id": "2001003",
+  "source_game": "MapleStory Classic World",
+  "source_snapshot": "Release",
+  "source_client_build": "1.0.0",
+  "source_url": "https://maplestory.quest/classes/magician/skills/magic-claw",
+  "range_px": 300,
+  "player_feet_offset_px": 35,
+  "feet_tolerance_px": 24,
+  "world_units_per_screen_px": 1.0,
+  "exact_vertical_hitbox": null,
+  "policy": "Conservative same-surface proxy; feet offsets and tolerance are estimates, not exported engine hitbox coordinates."
+}

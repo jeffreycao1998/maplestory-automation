@@ -1141,7 +1141,7 @@ class SetupWizard(tk.Toplevel):
         sc.grid(row=0, column=1, padx=8)
         range_lbl.grid(row=0, column=2)
         ttk.Label(sf, foreground="#555555",
-                  text="Start around 300 px and check the green box in the live preview: it should "
+                  text="Magic Claw is capped at 300 px. The green box is a range guide; it should "
                        "end where your Magic Claw stops hitting. A bit short is safer than too long.").grid(row=1, column=0, columnspan=3, sticky="w")
 
         ttk.Label(sf, text="Time between casts (seconds):").grid(row=2, column=0, sticky="w", pady=(8, 0))

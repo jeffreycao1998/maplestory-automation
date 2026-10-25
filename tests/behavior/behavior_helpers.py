@@ -34,6 +34,7 @@ def perc(t=0.0, map_x=0.5, mobs=(), player=(PLAYER_X, PLAYER_Y), hp=1.0, mp=1.0,
 
 def make_settings(**over):
     s = Settings()
+    s.skill.targeting_profile = "generic"
     s.loot.enabled = False
     s.behavior.edge_margin = 0
     s.behavior.reaction_s = 0

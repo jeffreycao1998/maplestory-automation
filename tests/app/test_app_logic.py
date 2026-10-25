@@ -304,7 +304,7 @@ def test_build_settings_applies_and_does_not_mutate_base():
     assert errors == []
     assert new.skill.range_px == 420 and new.calibration.minimap_box == [5, 6, 150, 100]
     assert new.debug_preview is False
-    assert base.skill.range_px == 350 and base.calibration.minimap_box is None
+    assert base.skill.range_px == 300 and base.calibration.minimap_box is None
 
 
 def test_build_settings_collects_all_errors():
@@ -330,7 +330,7 @@ def test_cross_field_errors():
 
 def test_defaults_for_section():
     d = L.defaults_for_section("skill")
-    assert d[("skill", "range_px")] == "350"
+    assert d[("skill", "range_px")] == "300"
 
 
 def test_sections_order_and_labels():

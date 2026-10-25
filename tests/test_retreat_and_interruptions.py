@@ -21,7 +21,7 @@ from maplebot.types import Action as A, Decision, Flag, Frame, Mob, Perception, 
 
 
 def settings():
-    s=Settings();s.loot.enabled=False
+    s=Settings();s.skill.targeting_profile="generic";s.loot.enabled=False
     s.calibration.patrol_y=.5
     s.calibration.minimap_box=[10,10,200,100]
     s.calibration.safe_spot=[.4,.5]

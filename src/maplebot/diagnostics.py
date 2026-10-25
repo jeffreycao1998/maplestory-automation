@@ -26,6 +26,8 @@ def decision_message(perception, decision, settings, observe_only=False):
     p,d=perception,decision
     prefix='OBSERVE ONLY — no game input' if observe_only else 'Running'
     details=[d.reason or d.state,perception_summary(p)]
+    if settings.training_only:details.append('training only: manual looting off')
+    if settings.skill.targeting_profile=='magic_claw':details.append('Magic Claw: 300 range cap; conservative platform/height filter')
     if d.retreat_reason:details.append(d.retreat_reason)
     binds=settings.keys
     keys={

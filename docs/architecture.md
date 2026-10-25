@@ -308,3 +308,20 @@ Resume, before the countdown; Observe only never activates the game. Activation
 failure leaves the countdown available for a manual click. It never bypasses the
 Controller foreground guard or automatically steals focus after a pause. The main
 window's topmost preference applies while stopped so it cannot cover game capture.
+
+## Training focus and Magic Claw eligibility
+
+`Settings.training_only` defaults true, including for older profiles without this
+field. It suppresses manual pickup, loot pursuit and drop matching even if a saved
+`loot.enabled` is true. Potions, retreat, navigation and stop guards remain active.
+`Skill.targeting_profile` defaults to `magic_claw`; `generic` retains manually tuned
+legacy targeting for other skills and synthetic fixtures.
+
+Magic Claw's release record supplies a 300 forward range but no exported `lt/rb`
+rectangle. Its targeting profile is therefore a conservative eligibility model, not
+an exact engine hitbox. It requires a verified player name/position, configured
+vertical limits and compatible floor height. With registered source geometry, use
+world-space platform height to account for slopes and reject other surfaces. Without
+that mapping, compare estimated sprite feet with player feet using a conservative
+screen-space tolerance. Rejecting some valid cross-platform shots is intentional;
+no legacy private-server hitbox is treated as Classic World truth.

@@ -189,7 +189,7 @@ class BotRunner:
                 except RuntimeError as e:
                     raise RunnerError(str(e)) from e
 
-            perceiver = Perceiver(s, mob_templates, self.profile.player_template(), self.profile.item_templates(),
+            perceiver = Perceiver(s, mob_templates, self.profile.player_template(), None if s.training_only else self.profile.item_templates(),
                                   self.profile.alert_templates(), map_reference=self.profile.map_reference_descriptor(s))
             behavior = Behavior(s, map_model)
             supervisor = Supervisor(s)
@@ -439,7 +439,10 @@ def annotate(frame: Frame, p: Perception, d: Optional[Decision], s: Settings) ->
         px, py = p.player_screen
         colour = (0, 200, 255) if p.player_screen_estimated else (0, 255, 0)
         cv2.circle(img, (px, py), 8, colour, 2)
-        r, v = s.skill.range_px, s.skill.vertical_tolerance_px
+        from .behavior.targeting import SkillTargeting
+        from .mapmodel import MapModel
+        r = SkillTargeting(s,MapModel.from_settings(s)).range_px
+        v = s.skill.vertical_tolerance_px
         cv2.rectangle(img, (px - r, py - v), (px + r, py + v), colour, 1)
     target = d.target if d else None
     for m in p.mobs:
