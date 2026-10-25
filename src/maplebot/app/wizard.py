@@ -327,6 +327,7 @@ class SetupWizard(tk.Toplevel):
         self.ctx.screenshot_size = (w, h)
         self.s.calibration.reference_size = [w,h]
         self.session_boxes = []
+        self._sprite_boxes = []             # matches belonged to the previous screenshot
         if old and old != (w, h):
             self.info(f"The game window size changed ({old[0]} x {old[1]} -> {w} x {h}). "
                       "Draw the boxes again on this screenshot.", "#a05a00")
@@ -549,6 +550,11 @@ class SetupWizard(tk.Toplevel):
     def _build_mobs(self, f):
         if not self._need_screenshot(f):
             return
+        row = ttk.Frame(f)
+        row.pack(fill="x", pady=(0, 6))
+        ttk.Button(row, text="Download sprites for this map…", command=self._download_sprites).pack(side="left")
+        ttk.Label(row, text="  Automatic monster poses and known drops. Drawing boxes is optional.",
+                  foreground="#555555").pack(side="left")
         bar = ttk.Frame(f)
         bar.pack(fill="x", pady=(0, 6))
         self._retake_button(bar, self._redraw_mobs).pack(side="left")
@@ -557,8 +563,7 @@ class SetupWizard(tk.Toplevel):
         ttk.Radiobutton(bar, text="Drop / mesos (optional)", variable=self.crop_kind, value="item").pack(side="left", padx=4)
         ttk.Radiobutton(bar, text="Stop alert", variable=self.crop_kind, value="alert").pack(side="left", padx=4)
         ttk.Label(bar, foreground="#555555",
-                  text="  Each box is saved right away. To add another mob, just drag another box "
-                       "(retake the screenshot to catch other poses).").pack(side="left")
+                  text="  Optional: save an example if downloaded sprites miss a monster.").pack(side="left")
         self.canvas = ImageCanvas(f, self.canvas_w, self.canvas_h - 90)
         self.canvas.pack()
         self.canvas.mode = "box"
@@ -569,8 +574,26 @@ class SetupWizard(tk.Toplevel):
         self._refresh_templates()
 
     def _redraw_mobs(self):
-        self.canvas.overlays = self._overlays(("box", b, ORANGE, "mob") for b in self.session_boxes)
+        boxes = [("box", b, ORANGE, "example") for b in self.session_boxes]
+        boxes += [("box", b, GREEN, "sprite match") for b in getattr(self, "_sprite_boxes", [])]
+        self.canvas.overlays = self._overlays(boxes)
         self.canvas.show(self.image)
+
+    def _download_sprites(self):
+        window = getattr(self, "sprite_download_win", None)
+        if window is not None and window.winfo_exists():
+            window.lift()
+            return
+        from .sprite_download import SpriteDownloadWindow
+        self.sprite_download_win = SpriteDownloadWindow(self, self._sprites_installed)
+
+    def _sprites_installed(self, manifest, matches):
+        self._sprite_boxes = [(int(m.x-m.w/2), int(m.y-m.h/2), int(m.w), int(m.h)) for m in matches]
+        self._refresh_templates()
+        self._redraw_mobs()
+        self.info(f"Downloaded sprites for {manifest['map_name']}. "
+                  f"{len(matches)} matches highlighted in green. No mob boxes required; click Next. "
+                  "Check Observe only before starting with keys.")
 
     def _got_mob(self, box):
         if box is None:
@@ -630,8 +653,10 @@ class SetupWizard(tk.Toplevel):
             ttk.Label(self.thumb_row, text="No mob pictures yet.", foreground="#777777").pack(side="left")
             return
         ttk.Label(self.thumb_row, text="Saved:").pack(side="left", padx=(0, 6))
-        for p in paths:
+        for p in paths[:10]:
             self._thumb(self.thumb_row, p, lambda p=p: self._delete_template(p))
+        if len(paths) > 10:
+            ttk.Label(self.thumb_row, text=f"+ {len(paths)-10} more references").pack(side="left")
 
     def _thumb(self, parent, path: Path, on_delete):
         cell = ttk.Frame(parent, padding=2)

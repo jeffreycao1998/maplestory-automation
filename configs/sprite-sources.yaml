@@ -1,0 +1,9 @@
+{
+  "catalog_repository": "andrenogrib/gms_v83_wztoweb",
+  "catalog_revision": "58c0c763b2eb4a868e5aeb198e6ead3313f229df",
+  "sprite_api": "https://maplestory.io/api/GMS/83",
+  "max_monsters": 24,
+  "max_frames_per_action": 32,
+  "max_mob_templates": 256,
+  "max_items": 128
+}

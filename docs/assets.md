@@ -1,5 +1,44 @@
 # Importing game knowledge without drawing every sprite
 
+## Download from the setup wizard
+
+On the **Mobs** step, click **Download sprites for this map…**, search by map name or
+numeric map ID, select the matching map and click **Download and use these sprites**.
+You can then click Next without drawing any monster boxes. Manual screenshot examples
+remain available if a pose is missed. A Git installation and terminal commands are not
+needed for this path.
+
+The global v83 map catalog identifies the map's monsters. The app requests each
+monster's standing, movement, flight, jump and supported attack/skill animation frames
+from the [MapleStory.io sprite API](https://github.com/crrio/maplestory.io/blob/master/maplestory.io/Controllers/API/MobController.cs).
+Death/hurt animation books are excluded. Identical poses are deduplicated. It also
+downloads the map's known Client Monster Book item icons; missing icons are reported.
+Only this map's references are loaded for detection, rather than scanning thousands
+of unrelated monsters every tick. Selecting another map in setup changes the references.
+
+Downloads happen during setup, with progress, cancellation, HTTPS host restrictions,
+size limits and three concurrent asset requests. Files are cached in `profile/sprite-cache/`.
+No screenshots, names or profile data are uploaded. Each map's immutable sprite banks
+live under its templates folder; `sprite-library.json` atomically selects the active
+bank. Interrupted copying keeps the old bank active. Existing screenshot crops stay
+in place. Old banks are retained, and both app updates and map renaming preserve them.
+
+The setup dialog highlights full-bank matches on the captured screenshot. Use **Observe
+only** on the main window to check the normal detector before enabling keys. A successful
+download is not a detection-accuracy test: v83 and Classic may differ, covered/partly
+off-screen mobs can be missed, and dropped icons can rotate or look unlike inventory
+icons. If the animation service is unavailable, any preview-only fallback is explicitly
+reported. The reference library is not a trained universal detector.
+
+The Tree That Grew II download obtained **14 distinct monster poses and 52 item icons**;
+6 catalog item icons were unavailable. On the repository's one labeled screenshot,
+normal detection with the default 8-reference-per-tick budget found **3/6 mobs**, with
+0 false positives; an all-14-pose setup preview found **4/6**, with 0 false positives.
+The two remaining mobs were partly off-screen or covered by a hit effect. These results
+do not meet the 90% recall target or establish accuracy on other recordings/maps.
+
+## Original command-line catalog importer
+
 The reference importer selects a map's mobs and their Client Monster Book item drops
 from the public [GMS v83 WZ catalog](https://github.com/andrenogrib/gms_v83_wztoweb).
 It copies transparent sprite PNGs and records IDs, names, source paths, SHA-256 hashes,
@@ -7,7 +46,7 @@ and the catalog commit in `manifest.json`. This is reference matching, not train
 neural detector. Original game art belongs to Nexon; downloaded packs stay local and
 are ignored by this repository.
 
-## Build a map pack
+### Build a map pack
 
 From the repository root (Windows: use `python`; a virtual environment is recommended):
 

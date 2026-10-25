@@ -5,6 +5,11 @@ presses keys, the same way you would. It doesn't touch the game's files or memor
 
 You don't need to know any programming. Setup takes about 10 minutes the first time.
 
+For monster/drop setup, use **Download sprites for this map…** on the wizard's **Mobs**
+step. Select the game's map name and download its animation poses and drop icons.
+Drawing monster boxes is optional. Check the green matches and try **Observe only**
+before starting with keys. See [sprite setup and its detection limits](assets.md).
+
 > **Read this first.** Using a bot breaks Nexon's Terms of Service. Accounts on official
 > servers **do get banned**, sometimes long after the fact. Only use it on an account
 > you can afford to lose, and never leave it running unattended for long.
@@ -31,6 +36,14 @@ If you skip this, `start.bat` notices, opens the download page for you and tells
 
 Double-click **`start.bat`** in the MapleBot folder.
 
+- Windows asks **"Do you want to allow this app to make changes?"** Click **Yes**. The
+  game runs as administrator, so the bot has to as well. Otherwise Windows silently
+  blocks its key presses.
+- **The first time**, a black window installs what the bot needs. This takes a few
+  minutes. After that, start-up takes a few seconds.
+- The **MapleBot** window then opens. If setup isn't done yet, the **setup wizard** opens
+  automatically.
+
 ### Updating after installation
 
 Stop the bot, then click **Check for updates** in the main window. Confirm the update;
@@ -39,18 +52,9 @@ Your map setups, keybinds, templates, logs, recordings and downloaded assets sta
 An internet connection is needed. Details and recovery: [updating.md](updating.md).
 
 Older copies need one final ZIP download to get this button. Download the
-`codex/smarter-navigation-and-looting` branch (the feature branch currently containing
-these improvements). If you extract into a new folder, copy your old `profile/` and
+`main` branch. If you extract into a new folder, copy your old `profile/` and
 any local `data/` assets into it before starting. Keep the old folder as a backup.
 Future updates use the button.
-
-- Windows asks **"Do you want to allow this app to make changes?"** Click **Yes**. The
-  game runs as administrator, so the bot has to as well. Otherwise Windows silently
-  blocks its key presses.
-- **The first time**, a black window installs what the bot needs. This takes a few
-  minutes. After that, start-up takes a few seconds.
-- The **MapleBot** window then opens. If setup isn't done yet, the **setup wizard** opens
-  automatically.
 
 ## 4. Before the wizard: get the game ready
 
@@ -74,7 +78,7 @@ it's in front and nothing covers it.
 | 2. Screenshot | Click **Take screenshot**, then click on the game. | Stand somewhere with a monster or two on screen. Steps 3 to 7 all use this picture. |
 | 3. Minimap | **Drag a box** around the minimap. A cyan box shows what you picked. | Include the whole map area but not its title bar. Drag again to redo it. |
 | 4. Your dot | The minimap is shown zoomed in. **Click your own yellow dot.** A green circle shows where the bot sees you. | Don't click party members' orange dots. If the circle isn't on your dot, click **Try again**. |
-| 5. Mobs | **Drag a tight box** around a monster. Each box is saved straight away and appears as a thumbnail. Draw another box to add another. | Keep the box **tight**, with as little background as possible. Add **2 or 3 pictures** of each monster in different poses (walking, turning, getting hit). Use **Retake screenshot** to catch other poses, and **Delete** to remove a bad picture. |
+| 5. Mobs | Click **Download sprites for this map…**, select the game's map name, then **Download and use these sprites**. Continue with Next; mob boxes are optional. | Downloaded animation poses and drop icons are saved for this map. Green boxes show sprite matches. Use **Observe only** before enabling keys. If a pose is missed, you can optionally add a tight screenshot example. |
 | 6. Your name tag | Drag a tight box around the **name tag under YOUR character**. The bot uses it to know exactly where you are. **This step is required**: without it, the bot only guesses your position and won't attack. | Box just your name, not other players' tags or your guild name. If you change characters, redo this step. |
 | 7. HP and MP bars | Pick **HP bar** and drag along the red bar. **This one is required**: the bot uses it to stop before your character dies. Then do the same for the blue **MP bar**. The wizard shows how full it reads each bar, e.g. "HP reads 43% full". | The MP bar is optional but **strongly recommended for magicians**: you run out of MP fast, and without it the bot can't drink MP potions. Check the numbers roughly match the game. |
 | 8. Training area | Walk your character to the **left end** of where it should train. Click **Set left** and click the game during the countdown. Then walk to the **right end** and click **Set right**. The wizard also records how high that bridge is on the minimap. | **Pick one bridge, set both edges on that same bridge, a little in from its ends.** On maps like The Tree That Grew II, with a stack of sagging rope bridges, the wizard warns "those two spots look like different bridges" if your two readings are at different heights. You can fine-tune both numbers in the boxes (0 = far left of the minimap, 1 = far right). |

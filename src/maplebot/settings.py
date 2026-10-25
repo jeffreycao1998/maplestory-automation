@@ -408,7 +408,26 @@ class Profile:
         return Path(os.environ.get("MAPLEBOT_LOGS", REPO_ROOT / "logs"))
 
     def mob_templates(self) -> List[Path]:
-        return sorted(self.templates_dir.glob("mob_*.png"))
+        return sorted(self.templates_dir.glob("mob_*.png")) + self.library_templates("mob")
+
+    def library_templates(self, kind: str) -> List[Path]:
+        """Only the atomically published bank is active; old banks/manual crops coexist."""
+        import re
+        record = self.templates_dir / "sprite-library.json"
+        if not record.is_file():
+            return []
+        try:
+            value = json.loads(record.read_text(encoding="utf-8"))
+            bank_id = value["bank"]
+            if not re.fullmatch(r"[0-9a-f]{32}", bank_id):
+                return []
+            bank = self.templates_dir / ".sprite-banks" / bank_id
+            return [bank / row["file"] for row in value["entries"]
+                    if row.get("kind") == kind and re.fullmatch(
+                        rf"{kind}_library_[0-9]+_[a-z0-9]+_[0-9]+\.png", row["file"])
+                    and (bank / row["file"]).is_file()]
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return []                         # needs a fresh download; never follow bad paths
 
     @property
     def alerts_dir(self) -> Path:
@@ -418,7 +437,7 @@ class Profile:
         return sorted(self.alerts_dir.glob("alert_*.png"))
 
     def item_templates(self) -> List[Path]:
-        return sorted(self.templates_dir.glob("item_*.png"))
+        return sorted(self.templates_dir.glob("item_*.png")) + self.library_templates("item")
 
     def player_template(self) -> Optional[Path]:
         p = self.templates_dir / "player.png"

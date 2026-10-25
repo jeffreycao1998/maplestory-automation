@@ -724,8 +724,8 @@ WIZARD_STEPS: List[WizardStep] = [
                "Click right on your own yellow dot on the zoomed-in minimap. "
                "A green circle shows where the bot sees you -- check it's on your dot."),
     WizardStep("mobs", "Mobs",
-               "Drag a tight box around one monster (just the monster, as little background as "
-               "possible). Add 2-3 pictures of the same monster in different poses for best results."),
+               "Click Download sprites for this map to get its monster animation poses and known "
+               "drop icons. Drawing boxes is optional: add a screenshot example only when a pose is missed."),
     WizardStep("player", "Your name tag",
                "Drag a tight box around the name tag under YOUR character -- the bot uses it to "
                "know exactly where you are. Just the name, not other players' tags."),
@@ -915,7 +915,7 @@ def step_problem(key: str, ctx: WizardContext) -> Optional[str]:
         return None
     if key == "mobs":
         if ctx.n_mob_templates <= 0:
-            return "Drag a box around at least one monster."
+            return "Download sprites for this map, or optionally draw a box around a monster."
         return None
     if key == "player":
         if not ctx.has_player_template:

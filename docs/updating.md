@@ -9,9 +9,8 @@ For a downloaded ZIP installation:
 There is no Git installation, GitHub browsing or manual ZIP extraction after the first
 installation containing the update button. A push is available through the button;
 maintainers do not have to publish a separate GitHub Release. The app checks the branch
-in `configs/updater.yaml`, currently `codex/smarter-navigation-and-looting`. It does not
-follow changes pushed only to another branch. Change the distributed channel to `main`
-when that branch contains these features.
+in `configs/updater.yaml`, currently `main`. Changes pushed only to a feature branch
+do not appear as app updates until they reach `main`.
 
 The first update of a ZIP copy records its installed commit. Before that, the dialog
 says **original ZIP** and may reinstall the same code once. Subsequent checks compare

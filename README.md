@@ -10,6 +10,8 @@ See [OCR, Observe mode, ladders, learning and economy](docs/reliability.md),
 [movement and looting setup](docs/navigation.md) and [bulk sprite/map import](docs/assets.md).
 ZIP installations can [update from the app](docs/updating.md) after installing a copy
 with the **Check for updates** button.
+The Mobs setup step can download a map's monster animation poses and drop icons;
+manual mob boxes are optional. This reference matcher still misses some covered mobs.
 The historical phase checklist is in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Layout
