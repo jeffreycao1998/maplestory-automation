@@ -25,3 +25,7 @@ data/reference-*/
 data/asset-packs/
 
 data/reference-banks/
+
+# Download staging, code backups and the installed revision (ZIP installations).
+.updates/
+.maplebot-update.json

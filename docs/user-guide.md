@@ -31,6 +31,19 @@ If you skip this, `start.bat` notices, opens the download page for you and tells
 
 Double-click **`start.bat`** in the MapleBot folder.
 
+### Updating after installation
+
+Stop the bot, then click **Check for updates** in the main window. Confirm the update;
+the app downloads the code, makes a backup, closes, installs and reopens itself.
+Your map setups, keybinds, templates, logs, recordings and downloaded assets stay in place.
+An internet connection is needed. Details and recovery: [updating.md](updating.md).
+
+Older copies need one final ZIP download to get this button. Download the
+`codex/smarter-navigation-and-looting` branch (the feature branch currently containing
+these improvements). If you extract into a new folder, copy your old `profile/` and
+any local `data/` assets into it before starting. Keep the old folder as a backup.
+Future updates use the button.
+
 - Windows asks **"Do you want to allow this app to make changes?"** Click **Yes**. The
   game runs as administrator, so the bot has to as well. Otherwise Windows silently
   blocks its key presses.

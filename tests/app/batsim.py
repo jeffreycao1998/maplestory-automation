@@ -26,6 +26,7 @@ class World:
     venv_create_ok: bool = True
     installed_matches: Optional[bool] = True   # None = no installed-pyproject.txt
     pip_ok: bool = True
+    update_in_progress: bool = False
     pythonw_exists: bool = True
     # What a background pythonw launch does: "ok" | "slow" | "crash" (writes app.pid,
     # dies a second later) | "dead" (dies at once, e.g. import error) | "hang" (alive,
@@ -275,6 +276,15 @@ class Batch:
             return None
         if low.startswith("fc /b"):
             self.errorlevel = 0 if w.installed_matches else 1
+            return None
+        if '--install-dependencies' in low:
+            if w.update_in_progress or w.already_open:
+                self.errorlevel = 3
+            else:
+                w.pip_installs += 1
+                self.errorlevel = 0 if w.pip_ok else 1
+                if w.pip_ok:
+                    w._files.add(r".venv\installed-pyproject.txt")
             return None
         if '-m pip install -e' in low:
             w.pip_installs += 1

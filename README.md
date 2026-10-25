@@ -8,6 +8,8 @@ New movement/loot features, safe-spot retreat, prompt/focus stops and optional p
 are tested offline; live Classic timing still needs validation.
 See [OCR, Observe mode, ladders, learning and economy](docs/reliability.md),
 [movement and looting setup](docs/navigation.md) and [bulk sprite/map import](docs/assets.md).
+ZIP installations can [update from the app](docs/updating.md) after installing a copy
+with the **Check for updates** button.
 The historical phase checklist is in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Layout

@@ -89,6 +89,14 @@ def test_path_install_failed():
     assert any("Installing failed" in e for e in w.echoed)
 
 
+@pytest.mark.parametrize("busy", [{"update_in_progress": True}, {"already_open": True}])
+def test_dependency_install_does_not_race_app_or_updater(busy):
+    w = run(installed_matches=False, **busy)
+    assert w.exit_code == 3 and w.pip_installs == 0
+    assert w.started_pythonw == 0 and w.started_console == 0
+    assert any("open or updating" in e for e in w.echoed)
+
+
 def test_path_app_already_open():
     w = run(already_open=True)
     assert w.exit_code == 0 and not w.pid_deleted_while_alive

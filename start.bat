@@ -69,10 +69,11 @@ if not errorlevel 1 goto :launch
 
 :install
 echo Installing / updating MapleBot's parts...
-".venv\Scripts\python.exe" -m pip install --upgrade pip
-".venv\Scripts\python.exe" -m pip install -e .
+rem Hold the installation lock during pip, too: a second launcher must not
+rem install dependencies while the update helper is replacing app files.
+".venv\Scripts\python.exe" "src\maplebot\app\updater.py" --install-dependencies "%CD%"
+if errorlevel 3 goto :install_busy
 if errorlevel 1 goto :install_failed
-copy /y "pyproject.toml" ".venv\installed-pyproject.txt" >nul
 
 :launch
 rem ---- 4. Launch the app (no console window) ------------------------------
@@ -153,6 +154,12 @@ echo Couldn't create the .venv folder. Make sure this folder isn't read-only
 echo (for example, not inside "Program Files") and try again.
 pause
 exit /b 1
+
+:install_busy
+echo.
+echo MapleBot is open or updating. Close the other copy or wait for the update to finish.
+pause
+exit /b 3
 
 :install_failed
 echo.
