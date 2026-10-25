@@ -19,7 +19,7 @@ import traceback
 from pathlib import Path
 from typing import Optional
 
-from maplebot.settings import Profile, Settings
+from maplebot.settings import Profile, Settings, REPO_ROOT
 
 from . import logic
 
@@ -105,6 +105,7 @@ class App:
         self._preview_img = None
         self._preview_photo = None
         self._closing = False
+        self._updating = False
         self._preview_on = False        # plain mirror of preview_var, safe to read from the worker
         self.wizard = None
         self.settings_win = None
@@ -209,6 +210,13 @@ class App:
         ttk.Button(brow, text="Open logs folder", command=self.open_logs).pack(
             side="left", expand=True, fill="x", padx=(3, 0))
 
+        urow = ttk.Frame(outer)
+        urow.pack(fill="x", pady=(6, 0), side="bottom")
+        self.update_btn = ttk.Button(urow, text="Check for updates", command=self.check_for_updates)
+        self.update_btn.pack(side="left")
+        self.update_lbl = ttk.Label(urow, text="", wraplength=300)
+        self.update_lbl.pack(side="left", padx=(8, 0))
+
         self._apply_ontop()
         self._refresh_maps()
         self._refresh_buttons()
@@ -260,7 +268,7 @@ class App:
         map_id = logic.map_label_to_id(self._map_choices, self.map_var.get())
         if map_id is None or map_id == self.profile.current_map:
             return
-        if self.running:
+        if self.running or self._updating:
             self._refresh_maps()            # snap back: can't switch while the bot runs
             return
         self._switch_to(map_id)
@@ -293,7 +301,7 @@ class App:
                                              hint=logic.NEW_MAP_HINT))
 
     def new_map(self):
-        if self.running:
+        if self.running or self._updating:
             return
         from tkinter import messagebox
         name = self._ask_map_name("New map", "Name of the map you want to train on:")
@@ -315,7 +323,7 @@ class App:
         self.open_wizard(kept_from=old_name if (had_old and had_setup) else None)
 
     def rename_map(self):
-        if self.running:
+        if self.running or self._updating:
             return
         from tkinter import messagebox
         cur_name = self.profile.current_map_name()
@@ -331,7 +339,7 @@ class App:
         self._refresh_maps()
 
     def delete_map(self):
-        if self.running:
+        if self.running or self._updating:
             return
         from tkinter import messagebox
         name = self.profile.current_map_name()
@@ -363,18 +371,20 @@ class App:
 
     def _refresh_buttons(self):
         running = self.running
+        busy = running or self._updating
         text, enabled, self._start_action = logic.start_state(
             self._problems(), self._map_set_up(), running, self.settings)
-        self.start_btn.state(["!disabled"] if enabled else ["disabled"])
-        self.observe_btn.state(["!disabled"] if enabled else ["disabled"])
+        self.start_btn.state(["!disabled"] if enabled and not busy else ["disabled"])
+        self.observe_btn.state(["!disabled"] if enabled and not busy else ["disabled"])
         self.start_btn.config(text=text)
-        self.map_combo.config(state="disabled" if running else "readonly")
+        self.map_combo.config(state="disabled" if busy else "readonly")
         for b in (self.new_map_btn, self.rename_map_btn, self.delete_map_btn):
-            b.state(["disabled"] if running else ["!disabled"])
+            b.state(["disabled"] if busy else ["!disabled"])
         self.pause_btn.state(["!disabled"] if running else ["disabled"])
         self.stop_btn.state(["!disabled"] if running else ["disabled"])
         for b in (self.wizard_btn, self.settings_btn):
-            b.state(["disabled"] if running else ["!disabled"])
+            b.state(["disabled"] if busy else ["!disabled"])
+        self.update_btn.state(["disabled"] if busy else ["!disabled"])
         paused = bool(self.runner and self.runner.status.paused)
         self.pause_btn.config(text="Resume" if paused else "Pause")
 
@@ -386,7 +396,7 @@ class App:
     _start_action = "start"
 
     def start(self, observe_only=False):
-        if self.running:
+        if self.running or self._updating:
             return
         if self._start_action == "wizard":
             self.open_wizard()
@@ -442,7 +452,7 @@ class App:
         self.countdown_lbl.config(text="")
 
     def open_wizard(self, kept_from=None):
-        if self.running:
+        if self.running or self._updating:
             return
         if self.wizard is not None and self.wizard.winfo_exists():
             self.wizard.lift()
@@ -468,7 +478,7 @@ class App:
         self.wizard.bind("<Destroy>", closed, add="+")
 
     def open_settings(self):
-        if self.running:
+        if self.running or self._updating:
             return
         if self.settings_win is not None and self.settings_win.winfo_exists():
             self.settings_win.lift()
@@ -483,6 +493,73 @@ class App:
             from tkinter import messagebox
             messagebox.showinfo("Logs folder", f"Logs are in:\n{self.profile.logs_dir}\n\n({e})",
                                 parent=self.root)
+
+    def check_for_updates(self):
+        if self.running or self._updating or self._closing:
+            return
+        from tkinter import messagebox
+        if self.settings_win is not None and self.settings_win.winfo_exists():
+            messagebox.showinfo("Save settings first", "Save and close Settings before updating.",
+                                parent=self.root)
+            return
+        self._updating = True
+        self.update_lbl.config(text="Checking GitHub…")
+        self._refresh_buttons()
+        threading.Thread(target=self._update_work, name="update-check", daemon=True).start()
+
+    def _update_work(self, update=None):
+        """Worker: downloads never block Tk, and never touch widgets."""
+        from . import updater
+        try:
+            if update is None:
+                self.events.put(("update_checked", updater.check_update(REPO_ROOT)))
+            else:
+                stage = updater.prepare_update(REPO_ROOT, update)
+                if self._closing:
+                    import shutil
+                    shutil.rmtree(stage, ignore_errors=True)
+                else:
+                    self.events.put(("update_prepared", stage))
+        except Exception as e:
+            log.exception("Update failed")
+            self.events.put(("update_error", e))
+
+    def _update_event(self, kind, payload):
+        from tkinter import messagebox
+        from . import updater
+        if kind == "update_checked" and payload is not None:
+            current = payload.installed[:8] if payload.installed else "original ZIP"
+            install = messagebox.askyesno(
+                "Update MapleBot?",
+                f"New code is available: {current} → {payload.revision[:8]}.\n\n"
+                "Download, back up the current app, and restart to install?\n"
+                "Your saved setup, logs, recordings and downloaded assets stay in place.",
+                parent=self.root)
+            if install and not self._closing:
+                self.update_lbl.config(text="Downloading and checking update…")
+                threading.Thread(target=self._update_work, args=(payload,),
+                                 name="update-download", daemon=True).start()
+                return
+            self.update_lbl.config(text="Update postponed")
+        elif kind == "update_checked":
+            self.update_lbl.config(text="You're up to date")
+        elif kind == "update_prepared":
+            try:
+                if self.running:
+                    raise updater.UpdateError("Stop the bot before installing an update.")
+                updater.launch_installer(REPO_ROOT, payload)
+            except Exception as e:
+                import shutil
+                shutil.rmtree(payload, ignore_errors=True)
+                self._update_event("update_error", e)
+                return
+            self.on_close()
+            return
+        else:
+            self.update_lbl.config(text="Update failed — current app kept")
+            messagebox.showerror("Couldn't update MapleBot", str(payload), parent=self.root)
+        self._updating = False
+        self._refresh_buttons()
 
     # ---- runner callbacks (worker thread!) -------------------------------------
     def _on_status(self, st):
@@ -509,6 +586,10 @@ class App:
                     self._show_error(payload)
                 elif kind == "done":
                     self._on_done()
+                elif kind.startswith("update_"):
+                    self._update_event(kind, payload)
+                    if self._closing:
+                        return
         except queue.Empty:
             pass
         if last_status is not None:
@@ -758,4 +839,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from maplebot.__main__ import run
+    run()
