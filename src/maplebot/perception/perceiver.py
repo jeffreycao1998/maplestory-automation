@@ -38,9 +38,12 @@ import cv2
 import numpy as np
 
 from maplebot.settings import Settings
-from maplebot.types import Box, Flag, Frame, Mob, Perception, PointPx
+from maplebot.types import Box, Flag, Frame, Item, Mob, Perception, PointPx
 
 from . import calib
+from .sprites import SpriteMatcher
+from .interruptions import AlertMatcher, central_panel
+from .hud import HUDReader
 
 log = logging.getLogger(__name__)
 
@@ -172,10 +175,17 @@ def _as_box(v) -> Optional[Box]:
 
 
 class Perceiver:
-    def __init__(self, settings: Settings, mob_templates: List[Path], player_template: Optional[Path]):
+    def __init__(self, settings: Settings, mob_templates: List[Path], player_template: Optional[Path],
+                 item_templates: Optional[List[Path]] = None, alert_templates: Optional[List[Path]] = None, hud_sync: bool = False):
+        self._hud_sync = hud_sync
+        self._hud = None
+        self._alerts = AlertMatcher(alert_templates)
+        self._sprites = SpriteMatcher()
         self._mob_raw: List[_Template] = []
         for p in mob_templates or []:
             p = Path(p)
+            if self._sprites.add(p):
+                continue
             bgr = _load_bgr(p)
             g = None if bgr is None else cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
             if g is None or not _usable_template(g):
@@ -194,13 +204,26 @@ class Perceiver:
 
         self.settings = settings
         self._prepared: List[_Prepared] = []
+        self._raw_cursor = 0
         self._player_small: Optional[np.ndarray] = None
         self._prep_key = None
         self.update_settings(settings)
+        self._items = (Perceiver(settings, item_templates, None) if item_templates else None)
 
     # ---- settings ---------------------------------------------------------------------
     def update_settings(self, settings: Settings) -> None:
+        previous = getattr(self, "settings", None)
+        changed = (previous is None or previous.ocr != settings.ocr or any(
+            getattr(previous.calibration,key) != getattr(settings.calibration,key)
+            for key in ("hp_stock_box","mp_stock_box","mesos_box","notification_box")))
+        if self._hud is not None and (not settings.ocr.enabled or changed):
+            self._hud.close()
+            self._hud = None
+        if settings.ocr.enabled and self._hud is None:
+            self._hud = HUDReader(settings, synchronous=self._hud_sync)
         self.settings = settings
+        if getattr(self, "_items", None) is not None:
+            self._items.update_settings(settings)
         scale = self._scale()
         key = (scale, bool(settings.detection.mirror_templates))
         if key == self._prep_key:
@@ -271,6 +294,8 @@ class Perceiver:
         cal = self.settings.calibration
         det = self.settings.detection
         flags = set()
+        if cal.reference_size is not None and list(cal.reference_size)!=[w,h]:
+            flags.add(Flag.VIEW_CHANGED)
 
         minimap_box = _as_box(cal.minimap_box)
         hp_box = _as_box(cal.hp_bar_box)
@@ -285,6 +310,10 @@ class Perceiver:
             flags.add(Flag.MINIMAP_MISSING)
 
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        if self.settings.safety.pause_on_dialog and central_panel(img):
+            flags.add(Flag.UNEXPECTED_DIALOG)
+        if self._alerts.matches(gray, self.settings.safety.alert_threshold):
+            flags.add(Flag.ALERT_MATCH)
         scale = self._scale()
         small = None
         if scale < 1.0:
@@ -294,6 +323,13 @@ class Perceiver:
         # 2. mobs
         mobs = self._find_mobs(img, small if small is not None else gray, float(det.mob_threshold),
                                [b for b in (minimap_box, hp_box, mp_box) if b is not None])
+
+        items = ()
+        if self._items is not None and self._items._prepared:
+            matches = self._items._find_mobs(img, small if small is not None else gray,
+                float(det.item_threshold), [b for b in (minimap_box, hp_box, mp_box) if b is not None],
+                include_sprites=False)
+            items = tuple(Item(m.x, m.y, m.w, m.h, m.score, m.template) for m in matches)
 
         # 3. player
         player_screen: Optional[PointPx] = None
@@ -307,9 +343,25 @@ class Perceiver:
             if self.player_template_configured:
                 flags.add(Flag.PLAYER_OFFSCREEN)
 
+        if self._items is not None and self._items._sprites.templates and not estimated:
+            loot = self.settings.loot
+            feet = player_screen[1] + loot.player_feet_offset_px
+            y0, y1 = max(0, feet-loot.floor_tolerance_px-32), min(h, feet+loot.floor_tolerance_px+32)
+            matches = self._items._sprites.find(img, max(det.item_threshold, 0.90),
+                [b for b in (minimap_box, hp_box, mp_box) if b is not None], False,
+                (0, y0, w, y1-y0), budget=det.sprite_templates_per_tick)
+            items += tuple(Item(m.x, m.y, m.w, m.h, m.score, m.template) for m in matches)
+
         # 4. bars
         hp = calib.bar_fill(img, hp_box) if hp_box is not None else None
         mp = calib.bar_fill(img, mp_box) if mp_box is not None else None
+
+        hud = self._hud.poll(img,t) if self._hud is not None else {}
+        if hud.get("inventory_full"):
+            flags.add(Flag.INVENTORY_FULL)
+        if self.settings.ocr.enabled and any(getattr(cal,kind+"_stock_box") is not None and
+                hud.get(kind+"_stock") is None for kind in ("hp","mp")):
+            flags.add(Flag.STOCK_UNREADABLE)
 
         # 5. confidence
         conf = confidence_for(player_map is not None,
@@ -320,16 +372,19 @@ class Perceiver:
         return Perception(
             t=t, screen_size=(w, h), player_map=player_map, player_screen=player_screen,
             player_screen_estimated=estimated, mobs=tuple(mobs), hp=hp, mp=mp,
-            flags=frozenset(flags), confidence=conf,
+            flags=frozenset(flags), confidence=conf, items=items, **hud,
         )
 
     # ---- mobs -------------------------------------------------------------------------
     def _find_mobs(self, img: np.ndarray, small: np.ndarray, threshold: float,
-                   exclude: Sequence[Box]) -> List[Mob]:
+                   exclude: Sequence[Box], include_sprites: bool = True) -> List[Mob]:
         """`img` is the full BGR frame; `small` its grayscale copy downscaled by
         detection.downscale (the full-size grayscale at 1.0)."""
+        sprite_mobs = self._sprites.find(img, max(threshold, 0.90), exclude,
+                                          self.settings.detection.mirror_templates,
+                                          budget=self.settings.detection.sprite_templates_per_tick) if include_sprites else []
         if not self._prepared:
-            return []
+            return sprite_mobs
         H_, W_ = img.shape[:2]
         sh, sw = small.shape[:2]
         # Actual scale per axis (rounding) so coordinates map back exactly.
@@ -341,7 +396,12 @@ class Perceiver:
 
         # Stage a: proposals from every template variant.
         proposals = []   # (coarse score, gx, gy, template)
-        for tp in self._prepared:
+        budget = max(1,int(self.settings.detection.sprite_templates_per_tick))*2
+        pool = self._prepared
+        if len(pool)>budget:
+            pool = [pool[(self._raw_cursor+i)%len(pool)] for i in range(budget)]
+            self._raw_cursor = (self._raw_cursor+budget)%len(self._prepared)
+        for tp in pool:
             th, tw = tp.small.shape[:2]
             if th > sh or tw > sw or tp.h > H_ or tp.w > W_:
                 continue
@@ -389,7 +449,8 @@ class Perceiver:
 
         return [Mob(x=int(round((c[1] + c[3]) / 2.0)), y=int(round((c[2] + c[4]) / 2.0)),
                     w=int(c[6]), h=int(c[7]), score=float(min(1.0, max(0.0, c[0]))), template=c[5])
-                for c in kept]
+                for c in kept] + [m for m in sprite_mobs if not any(
+                    abs(m.x - (c[1]+c[3])/2) < m.w/2 and abs(m.y-(c[2]+c[4])/2) < m.h/2 for c in kept)]
 
     def _verify(self, img: np.ndarray, tp: "_Prepared", gx: int, gy: int, pad: int, bpad: int,
                 threshold: float):
@@ -415,6 +476,16 @@ class Perceiver:
         rr = cv2.matchTemplate(sub, tp.verify, cv2.TM_CCOEFF_NORMED)
         np.nan_to_num(rr, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
         _, s, _, (bx, by) = cv2.minMaxLoc(rr)
+        # Gaussian blur needs surrounding pixels. A tight training crop has no real
+        # surrounding scene, so its border can disagree even for an exact sprite.
+        # Permit a strong interior match only when the whole crop is already plausible.
+        if threshold-HALF_BAND <= s < threshold and min(tp.w,tp.h)>2*bpad+4:
+            core = cv2.matchTemplate(sub[bpad:-bpad,bpad:-bpad],
+                                    tp.verify[bpad:-bpad,bpad:-bpad],cv2.TM_CCOEFF_NORMED)
+            np.nan_to_num(core,copy=False,nan=0,posinf=0,neginf=0)
+            _,core_score,_,(cx,cy) = cv2.minMaxLoc(core)
+            if core_score >= threshold+.15 and core_score-.15>s:
+                s,bx,by = core_score-.15,cx,cy
         if threshold - HALF_BAND <= s < threshold:
             s, bx, by = self._half_match(sub, tp, threshold, s, bx, by)
         if s < threshold:
@@ -499,3 +570,9 @@ class Perceiver:
         cx = best_xy[0] + tp.w // 2
         cy = best_xy[1] + tp.h // 2 - self._tag_offset()
         return (int(cx), int(max(0, cy)))
+
+    def close(self):
+        if self._hud is not None:
+            self._hud.close()
+        if self._items is not None:
+            self._items.close()

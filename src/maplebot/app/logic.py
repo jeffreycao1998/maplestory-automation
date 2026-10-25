@@ -12,6 +12,7 @@ a screen. No tkinter imports here (tests check that).
 from __future__ import annotations
 
 import dataclasses
+import json
 import math
 import re
 import typing
@@ -262,12 +263,32 @@ SECTION_LABELS = {
     "potions": "Potions",
     "behavior": "Movement",
     "safety": "Safety",
+    "retreat": "Safe retreat",
+    "play_style": "Play style",
+    "ocr": "Visible HUD reading",
+    "economy": "Economy",
     "general": "General",
 }
 
 # (section, field) -> (label, tooltip). Fields missing here still appear, with a
 # label made from the field name, so new settings never get lost.
 FIELD_INFO: Dict[Tuple[str, str], Tuple[str, str]] = {
+    ("ocr","enabled"): ("Read visible stock and wallet", "Requires the local OCR extra and tested HUD crops. Unreadable configured stock stops ordinary actions."),
+    ("economy","hp_replacement_cost"): ("HP potion replacement cost", "Meso value per potion stock decrease; empty means unknown. This is a valuation, not a recorded purchase."),
+    ("economy","mp_replacement_cost"): ("MP potion replacement cost", "Used to estimate net wallet change after valuing consumed stock; empty means unknown."),
+    ("calibration", "safe_spot"): ("Safe spot (minimap x, y)", "Choose this by clicking the minimap in the Training area wizard step. Must be on a known platform away from edges."),
+    ("retreat", "hp_start"): ("HP potions at run start (estimate)", "Enter your actual stock before each new run. Empty disables HP stock estimation; this is not inventory OCR."),
+    ("retreat", "mp_start"): ("MP potions at run start (estimate)", "Enter actual MP stock before each new run. Potion key attempts reduce this estimate, including unsuccessful attempts."),
+    ("retreat", "hp_reserve"): ("Retreat at estimated HP potions", "Head to the safe spot when the estimate reaches this count."),
+    ("retreat", "mp_reserve"): ("Retreat at estimated MP potions", "Leave enough reserve for travel; this bot does not count your inventory visually."),
+    ("retreat", "hp_below"): ("Retreat below HP fraction", "Trigger retreat early; emergency potions and the critical-HP stop still take priority."),
+    ("retreat", "mp_below"): ("Retreat below MP fraction", "Low MP triggers retreat even when stock counts are unknown."),
+    ("play_style", "enabled"): ("Vary engagement timing", "Adds a brief reaction delay and positive cast-spacing variation. Safety actions stay immediate. Does not guarantee protection from detection."),
+    ("safety", "pause_on_dialog"): ("Pause on central dialog candidates", "Conservative screen heuristic; may pause on ordinary menus. Known alert reference pictures always cause a pause."),
+    ("keys", "pickup"): ("Pickup key", "Collect items and mesos. Empty disables all pickup input."),
+    ("calibration", "platforms"): ("Platforms (JSON)", "Measured minimap polylines. See docs/navigation.md for examples."),
+    ("calibration", "connections"): ("Connections (JSON)", "Directed, measured walk/jump/drop links between platforms."),
+    ("calibration", "route"): ("Platform route (JSON)", "Repeating list of platform names; empty stays on the training platform."),
     ("keys", "attack"): ("Attack skill key", "The key your attack skill (e.g. Magic Claw) is on."),
     ("keys", "jump"): ("Jump key", "Your jump key. Used to get unstuck."),
     ("keys", "left"): ("Walk left key", "Usually the Left arrow."),
@@ -316,11 +337,20 @@ FIELD_INFO: Dict[Tuple[str, str], Tuple[str, str]] = {
 # Fields whose input widget / parsing differs from what the type says.
 KIND_OVERRIDES = {
     ("keys", "attack"): "key", ("keys", "jump"): "key", ("keys", "left"): "key",
-    ("keys", "right"): "key", ("keys", "hp_potion"): "optional_key",
+    ("keys", "right"): "key", ("keys", "down"): "key",
+    ("keys", "pickup"): "optional_key",
+    ("calibration", "platforms"): "json_list",
+    ("calibration", "connections"): "json_list",
+    ("calibration", "route"): "json_list", ("keys", "hp_potion"): "optional_key",
     ("keys", "mp_potion"): "optional_key",
     ("safety", "pause_hotkey"): "hotkey", ("safety", "stop_hotkey"): "hotkey",
     ("calibration", "minimap_box"): "box", ("calibration", "hp_bar_box"): "box",
     ("calibration", "mp_bar_box"): "box",
+    **{("calibration",name):"box" for name in
+       ("hp_stock_box","mp_stock_box","mesos_box","notification_box")},
+    ("calibration","ladders"):"json_list",
+    ("calibration","movement_profile"):"json_object",
+    ("keys","up"):"key",
     ("calibration", "player_dot_hsv_low"): "hsv", ("calibration", "player_dot_hsv_high"): "hsv",
 }
 
@@ -479,6 +509,8 @@ def _fmt_num(v: float) -> str:
 
 def format_value(kind: str, value: Any) -> Any:
     """Value as shown in the form: text for entries, bool for checkboxes."""
+    if kind in ("json_list","json_object"):
+        return json.dumps(value)
     if kind == "bool":
         return bool(value)
     if value is None:
@@ -521,6 +553,15 @@ def _parse_list(text: str, label: str, integer: bool) -> List[float]:
 def parse_value(spec: FieldSpec, raw: Any) -> Any:
     """Turn what's in the form into a setting value. Raises FieldError (friendly)."""
     kind, label = spec.kind, spec.label
+    if kind in ("json_list","json_object"):
+        try:
+            value = json.loads(str(raw) or "[]")
+        except (ValueError, TypeError):
+            raise FieldError(label, "enter a JSON list; see docs/navigation.md.") from None
+        expected = list if kind=="json_list" else dict
+        if not isinstance(value,expected):
+            raise FieldError(label, f"must be a JSON {'list' if expected is list else 'object'}.")
+        return value
     if kind == "bool":
         if isinstance(raw, bool):
             return raw
@@ -608,7 +649,7 @@ def cross_field_errors(s: Settings) -> List[str]:
     k = s.keys
     used: Dict[str, str] = {}
     for lbl, val in (("Attack", k.attack), ("Jump", k.jump), ("Walk left", k.left),
-                     ("Walk right", k.right), ("HP potion", k.hp_potion), ("MP potion", k.mp_potion)):
+                     ("Walk right", k.right), ("Down", k.down), ("Pickup", k.pickup), ("HP potion", k.hp_potion), ("MP potion", k.mp_potion)):
         if not val:
             continue
         if val in used:
@@ -621,6 +662,7 @@ def cross_field_errors(s: Settings) -> List[str]:
     for hk in (ph, sh):
         if hk and hk in used:
             errs.append(f"The {hk} hotkey is also your {used[hk]} key -- pick another hotkey.")
+    errs.extend(s.mechanics_problems())
     return errs
 
 
@@ -691,6 +733,8 @@ WIZARD_STEPS: List[WizardStep] = [
                "Drag a box along your red HP bar (required: the bot stops before your character "
                "dies), then your blue MP bar (recommended for magicians: it lets the bot drink MP "
                "potions). Box just the coloured bar."),
+    WizardStep("supplies", "Visible supplies (optional)",
+               "Box just the number on each potion shortcut, your meso balance, and optionally the loot notification area. Test the readings before enabling local OCR. You can skip this step.", optional=True),
     WizardStep("patrol", "Training area",
                "Walk your character to the LEFT end of where it should train, then click Set left. "
                "Then walk to the RIGHT end and click Set right. Pick one bridge, set both edges on "
@@ -924,6 +968,8 @@ def summary_lines(ctx: WizardContext, player_template: Optional[bool] = None) ->
         + (f", platform height {c.patrol_y:.2f}" if c.patrol_y is not None else ""),
         f"Attack: {display_name(k.attack)}   Jump: {display_name(k.jump)}   "
         f"HP potion: {display_name(k.hp_potion)}   MP potion: {display_name(k.mp_potion)}",
+        f"Safe spot: {c.safe_spot if c.safe_spot is not None else 'not set'}",
+        f"Potion estimates at run start: HP {s.retreat.hp_start}, MP {s.retreat.mp_start}",
         f"Skill reach: {s.skill.range_px} px   Time between casts: {s.skill.cooldown_s:.2f} s",
         f"Pause/resume: {s.safety.pause_hotkey.upper()}   Stop: {s.safety.stop_hotkey.upper()}",
     ]
@@ -944,6 +990,14 @@ def format_percent(v: Optional[float]) -> str:
     return "--" if v is None else f"{round(v * 100):d}%"
 
 
+def format_potion_estimates(st) -> str:
+    def count(kind):
+        visible = getattr(st,kind+"_stock",None)
+        estimate = getattr(st,kind+"_pots_estimated",None)
+        return str(visible) if visible is not None else "--" if estimate is None else f"~{estimate}"
+    return f"H:{count('hp')} M:{count('mp')}"
+
+
 def format_status(st) -> Dict[str, str]:
     """Status -> label texts for the main window."""
     if not st.running:
@@ -951,13 +1005,16 @@ def format_status(st) -> Dict[str, str]:
     elif st.paused:
         state = "Paused"
     else:
-        state = st.state or "Running"
+        state = ("Observe: " if st.observe_only else "") + (st.state or "Running")
     return {
         "state": state,
-        "action": (st.action or "--").replace("_", " "),
+        "action": ("would " if st.observe_only else "")+(st.action or "--").replace("_", " "),
         "mobs": str(st.n_mobs),
         "map_x": "--" if st.map_x is None else f"{st.map_x:.2f}",
         "hp": format_percent(st.hp),
+        "potions": format_potion_estimates(st),
+        "wallet_delta": "--" if st.wallet_delta is None else f"{st.wallet_delta:+,}",
+        "net_hour": "--" if st.net_per_hour is None else f"{st.net_per_hour:+,.0f}",
         "mp": format_percent(st.mp),
         "attacks": str(st.attacks),
         "runtime": format_runtime(st.runtime_s),
@@ -1108,3 +1165,19 @@ def clean_map_name(raw: Optional[str]) -> Optional[str]:
         return None
     name = " ".join(str(raw).split())
     return name or None
+
+
+def pick_safe_spot(settings, click):
+    """Image pixel click -> validated minimap marker; shared by wizard and tests."""
+    from maplebot.mapmodel import MapModel
+    box = settings.calibration.minimap_box
+    if box is None:
+        raise ValueError("Set the minimap box first")
+    x,y,w,h = box
+    px,py = click
+    if not (x <= px < x+w and y <= py < y+h):
+        raise ValueError("Click inside the minimap, on a known safe platform")
+    point = [(px+.5-x)/w, (py+.5-y)/h]
+    model = MapModel.from_settings(settings)
+    model.safe_platform(point, settings.behavior.edge_margin)
+    return point

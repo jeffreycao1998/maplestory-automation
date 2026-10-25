@@ -154,6 +154,9 @@ class App:
         self.start_btn = ttk.Button(outer, text=logic.start_button_text(settings),
                                     style="Big.TButton", command=self.start)
         self.start_btn.pack(fill="x", pady=(8, 4))
+        self.observe_btn = ttk.Button(outer,text="Observe only — show decisions without keys",
+                                      command=lambda:self.start(observe_only=True))
+        self.observe_btn.pack(fill="x",pady=(0,4))
         row = ttk.Frame(outer)
         row.pack(fill="x")
         self.pause_btn = ttk.Button(row, text="Pause", style="Mid.TButton", command=self.pause_resume)
@@ -175,6 +178,7 @@ class App:
         self.vals = {}
         fields = [("state", "State"), ("action", "Doing"), ("mobs", "Mobs seen"),
                   ("map_x", "Map position"), ("hp", "HP"), ("mp", "MP"),
+                  ("potions", "Potions"), ("wallet_delta", "Wallet Δ"), ("net_hour", "Net est./hr"),
                   ("attacks", "Attacks"), ("runtime", "Running for"), ("fps", "Checks/sec")]
         for i, (key, label) in enumerate(fields):
             r, c = divmod(i, 3)
@@ -183,7 +187,7 @@ class App:
             v.grid(row=r * 2 + 1, column=c, sticky="w", padx=6, pady=(0, 4))
             self.vals[key] = v
         self.msg_lbl = ttk.Label(grid, text="", wraplength=PREVIEW_W - 20, justify="left")
-        self.msg_lbl.grid(row=6, column=0, columnspan=3, sticky="w", padx=6, pady=(4, 0))
+        self.msg_lbl.grid(row=2*((len(fields)+2)//3), column=0, columnspan=3, sticky="w", padx=6, pady=(4, 0))
 
         prow = ttk.Frame(outer)
         prow.pack(fill="x")
@@ -362,6 +366,7 @@ class App:
         text, enabled, self._start_action = logic.start_state(
             self._problems(), self._map_set_up(), running, self.settings)
         self.start_btn.state(["!disabled"] if enabled else ["disabled"])
+        self.observe_btn.state(["!disabled"] if enabled else ["disabled"])
         self.start_btn.config(text=text)
         self.map_combo.config(state="disabled" if running else "readonly")
         for b in (self.new_map_btn, self.rename_map_btn, self.delete_map_btn):
@@ -380,7 +385,7 @@ class App:
     # ---- buttons -------------------------------------------------------------
     _start_action = "start"
 
-    def start(self):
+    def start(self, observe_only=False):
         if self.running:
             return
         if self._start_action == "wizard":
@@ -393,10 +398,14 @@ class App:
                                    "Before starting:\n- " + "\n- ".join(probs) +
                                    "\n\nClick Setup wizard to fix this.", parent=self.root)
             return
+        if observe_only:
+            self.preview_var.set(True)
+            self._preview_toggled()
         try:
             from maplebot.runner import BotRunner
             self.runner = BotRunner(self.profile, self.settings,
-                                    on_status=self._on_status, on_preview=self._on_preview)
+                                    on_status=self._on_status, on_preview=self._on_preview,
+                                    observe_only=observe_only)
         except Exception as e:
             self._show_error(e)
             return

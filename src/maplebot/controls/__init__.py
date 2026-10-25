@@ -7,7 +7,7 @@ from .backends import (
     default_backend,
     normalize_key,
 )
-from .controller import Controller
+from .controller import Controller, InputBlocked
 
 __all__ = [
     "Controller",

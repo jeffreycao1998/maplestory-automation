@@ -161,3 +161,13 @@ when you ask for help.
 **Your setup** lives in the `profile` folder: `settings.yaml` holds the shared settings,
 and `maps\<map>\` holds each map's screen setup and its mob and name tag pictures. Back
 it up if you like. Delete it to start fresh.
+
+
+## Navigation, pickup and reference packs
+
+See [navigation.md](navigation.md) for ramps, platform links, down+jump, spell timing,
+edge braking, looting and the automatic minimap/bar setup buttons. See
+[assets.md](assets.md) for bulk sprite and map-data import without boxing every item.
+
+For visible potion/wallet OCR, Observe mode, ladders, movement measurements, real-frame
+reference learning and economy reports, see [reliability.md](reliability.md).

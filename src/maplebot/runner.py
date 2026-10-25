@@ -22,7 +22,7 @@ import cv2
 import numpy as np
 
 from .settings import Profile, Settings
-from .types import Action, Decision, Flag, Frame, Perception, Status, VerdictKind
+from .types import Action, Decision, Flag, Frame, Perception, Status, Verdict, VerdictKind
 
 log = logging.getLogger(__name__)
 
@@ -42,7 +42,9 @@ class BotRunner:
                  on_decision: Optional[Callable[[Decision], None]] = None,
                  use_hotkeys: bool = True,
                  clock: Callable[[], float] = time.monotonic,
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep,
+                 observe_only: bool = False):
+        self.observe_only = bool(observe_only)
         self.profile = profile
         self.settings = settings
         self._backend = backend
@@ -72,7 +74,7 @@ class BotRunner:
             c = self._controller
         if c is not None:
             c.inhibit(reason)
-        self._set_status(paused=True, message=reason)
+        self._set_status(paused=True, message=reason,hp_stock=None,mp_stock=None)
 
     def resume(self) -> None:
         with self._lock:
@@ -109,11 +111,13 @@ class BotRunner:
     # ---- main loop (worker thread) ----------------------------------------
     def run(self) -> None:
         from .behavior import Behavior
-        from .controls import Controller, default_backend
+        from .controls import Controller, FakeBackend, InputBlocked, default_backend
         from .mapmodel import MapModel
         from .perception import Perceiver, enable_dpi_awareness
         from .supervisor import Hotkeys, HotkeysUnavailable, RunLogger, Supervisor
 
+        from .supervisor.economy import EconomyTracker
+        economy = EconomyTracker(self.settings)
         s = self.settings
         problems = s.problems()
         if problems:
@@ -137,6 +141,7 @@ class BotRunner:
         hotkeys = None
         controller = None
         logger = None
+        perceiver = None
         ticks = 0
         attacks = 0
         t_start: Optional[float] = None
@@ -175,17 +180,22 @@ class BotRunner:
                 except WindowNotFound as e:
                     raise RunnerError(str(e)) from e
 
-            backend = self._backend
+            backend = FakeBackend() if self.observe_only else self._backend
             if backend is None:
                 try:
                     backend = default_backend()
                 except RuntimeError as e:
                     raise RunnerError(str(e)) from e
 
-            perceiver = Perceiver(s, mob_templates, self.profile.player_template())
+            perceiver = Perceiver(s, mob_templates, self.profile.player_template(), self.profile.item_templates(),
+                                  self.profile.alert_templates())
             behavior = Behavior(s, map_model)
             supervisor = Supervisor(s)
-            controller = Controller(s, backend)
+            controller = Controller(s, backend,
+                                    can_press=None if self.observe_only else getattr(capture, "is_foreground", None),
+                                    sleep=(lambda _: None) if self.observe_only else self._sleep,
+                                    movement_timeout_s=s.safety.input_timeout_s if not self.observe_only and
+                                      callable(getattr(capture,"is_foreground",None)) else None)
             try:
                 logger = RunLogger(self.profile.logs_dir, s)
             except OSError as e:
@@ -203,7 +213,7 @@ class BotRunner:
             last_preview = 0.0
             fps = 0.0
             period = 1.0 / max(1.0, s.behavior.loop_hz)
-            self._set_status(message=self._running_message())
+            self._set_status(message=self._running_message(), observe_only=self.observe_only)
 
             while not self._stop.is_set():
                 tick_t0 = self._clock()
@@ -222,6 +232,18 @@ class BotRunner:
                 if resume_now and not paused and not self._stop.is_set():
                     behavior.reset()
                     supervisor.reset(tick_t0 if own_capture else (t_start or 0.0))
+                    if own_capture:
+                        # A GUI Resume click focuses the app. Give the user the same
+                        # configured grace period to return to the game as on Start.
+                        end = self._clock() + max(0.0, s.safety.start_delay_s)
+                        while not self._stop.is_set() and not self.paused and self._clock() < end:
+                            left = max(0.0, end-self._clock())
+                            self._set_status(countdown_s=left,
+                                             message=f"Resuming in {left:.0f}… click into the game")
+                            self._sleep(0.1)
+                        self._set_status(countdown_s=None)
+                        if self.paused or self._stop.is_set():
+                            continue
 
                 if paused:
                     if t_start is not None and own_capture:
@@ -242,6 +264,7 @@ class BotRunner:
                     supervisor.reset(now)
 
                 p = perceiver.perceive(frame)
+                economy.observe(p, now)
                 verdict = supervisor.check(p, now)
 
                 if verdict.kind is not VerdictKind.OK:
@@ -255,7 +278,19 @@ class BotRunner:
                     continue
 
                 d = behavior.decide(p, now)
-                controller.execute(d.action, now)   # no-op if pause/stop raced in
+                try:
+                    controller.execute(d.action, now)   # no-op if pause/stop raced in
+                except InputBlocked as exc:
+                    logger.log_tick(p, None, Verdict(VerdictKind.PAUSE, str(exc)))
+                    logger.save_frame(frame, "focus_lost")
+                    self.pause(str(exc))
+                    continue
+                if controller.inhibited and not self.paused and not self._stop.is_set():
+                    reason = controller.inhibit_reason or "Input was inhibited"
+                    logger.log_tick(p,None,Verdict(VerdictKind.PAUSE,reason))
+                    logger.save_frame(frame,"input_stall")
+                    self.pause(reason)
+                    continue
                 supervisor.note_decision(d, now)
                 logger.log_tick(p, d, verdict)
                 if d.state == "STUCK":
@@ -268,13 +303,21 @@ class BotRunner:
                 ticks += 1
                 if d.action is Action.ATTACK:
                     attacks += 1
+                if d.action is Action.PICKUP and not self.observe_only:
+                    economy.pickup_attempts += 1
 
                 elapsed = self._clock() - tick_t0
                 inst = 1.0 / max(elapsed, period, 1e-3)
                 fps = inst if fps == 0 else fps * 0.9 + inst * 0.1
-                self._set_status(state=d.state, action=d.action.value, n_mobs=len(p.mobs),
+                ledger = economy.summary(now)
+                self._set_status(wallet_delta=ledger["wallet_delta"],net_per_hour=ledger["net_per_hour"],
+                                 state=d.state, action=d.action.value, n_mobs=len(p.mobs),
                                  map_x=p.player_map[0] if p.player_map else None,
                                  hp=p.hp, mp=p.mp, fps=fps, attacks=attacks,
+                                 hp_stock=p.hp_stock,mp_stock=p.mp_stock,
+                                 hp_pots_estimated=behavior.potion_estimates[0],
+                                 mp_pots_estimated=behavior.potion_estimates[1],
+                                 message=d.retreat_reason or self._running_message(),
                                  runtime_s=now - t_start)
 
                 if (self._on_preview and s.debug_preview
@@ -311,7 +354,11 @@ class BotRunner:
                 if t_start is not None:
                     runtime = (self._clock() - t_start) if own_capture else max(0.0, self.status.runtime_s)
                 logger.close({"stop_reason": stop_reason, "ticks": ticks, "attacks": attacks,
+                              "observe_only":self.observe_only,
+                              "economy":economy.summary(t_start+runtime if t_start is not None else 0),
                               "runtime_s": round(runtime, 1)})
+            if perceiver is not None:
+                perceiver.close()
             if own_capture and capture is not None:
                 try:
                     capture.close()
@@ -324,7 +371,7 @@ class BotRunner:
 
     # ---- helpers ------------------------------------------------------------
     def _running_message(self) -> str:
-        return "Running" + (f" — {self._hotkey_warning}" if self._hotkey_warning else "")
+        return ("OBSERVE ONLY — no game input" if self.observe_only else "Running") + (f" — {self._hotkey_warning}" if self._hotkey_warning else "")
 
     def _grab(self, capture) -> Optional[Frame]:
         try:
@@ -360,6 +407,9 @@ def annotate(frame: Frame, p: Perception, d: Optional[Decision], s: Settings) ->
         is_target = target is not None and (m.x, m.y) == (target.x, target.y)
         cv2.rectangle(img, (m.x - m.w // 2, m.y - m.h // 2), (m.x + m.w // 2, m.y + m.h // 2),
                       (0, 0, 255) if is_target else (0, 165, 255), 2)
+    for item in p.items:
+        cv2.rectangle(img, (item.x - item.w // 2, item.y - item.h // 2),
+                      (item.x + item.w // 2, item.y + item.h // 2), (0, 255, 255), 2)
     mm = s.calibration.minimap_box
     if mm:
         x, y, w, h = mm
@@ -371,6 +421,23 @@ def annotate(frame: Frame, p: Perception, d: Optional[Decision], s: Settings) ->
             ly = y + int(s.calibration.patrol_y * h)
             cv2.line(img, (x + int(s.calibration.patrol_left * w), ly),
                      (x + int(s.calibration.patrol_right * w), ly), (255, 0, 255), 1)
+        if d is not None and d.route:
+            from .mapmodel import MapModel
+            model = MapModel.from_settings(s)
+            for edge in model.connections:
+                if edge.name in d.route:
+                    a = (x+int(edge.launch_x*w), y+int(model.by_name(edge.source).height_at(edge.launch_x)*h))
+                    b = (x+int(edge.land_x*w), y+int(model.by_name(edge.target).height_at(edge.land_x)*h))
+                    cv2.arrowedLine(img,a,b,(0,180,255),1,tipLength=.2)
+        for ladder in s.calibration.ladders:
+            lx = x+int(ladder["x"]*w)
+            cv2.line(img,(lx,y+int(ladder["top"]*h)),(lx,y+int(ladder["bottom"]*h)),(255,255,150),2)
+        if s.calibration.safe_spot is not None:
+            sx, sy = s.calibration.safe_spot
+            cv2.drawMarker(img, (x+int(sx*w), y+int(sy*h)), (255,255,255), cv2.MARKER_CROSS, 12, 2)
+        for platform in s.calibration.platforms:
+            points = np.array([(x+int(px*w), y+int(py*h)) for px, py in platform["points"]], np.int32)
+            cv2.polylines(img, [points], False, (255, 200, 0), 1)
         if p.player_map:
             cv2.circle(img, (x + int(p.player_map[0] * w), y + int(p.player_map[1] * h)), 4, (0, 255, 0), 1)
     label = f"{d.state if d else '-'} | {d.action.value if d else '-'} | mobs {len(p.mobs)}"

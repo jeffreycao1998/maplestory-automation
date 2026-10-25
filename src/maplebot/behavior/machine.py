@@ -53,6 +53,10 @@ from typing import List, Optional, Tuple
 from maplebot.mapmodel import MapModel
 from maplebot.settings import Settings
 from maplebot.types import Action, Decision, Flag, Mob, Perception
+from .navigation import Navigation
+from .retreat import RetreatState
+from .play_style import PlayTiming
+from dataclasses import replace
 
 # Tuning constants (behaviour internals, not user settings).
 MIN_CONFIDENCE = 0.5        # below this perception is not trusted
@@ -83,11 +87,13 @@ class Behavior:
     def __init__(self, settings: Settings, map_model: MapModel):
         self.settings = settings
         self.map = map_model
+        self._retreat = RetreatState(settings)
         self.reset()
 
     # ------------------------------------------------------------------ public API
     def reset(self) -> None:
         """Forget all beliefs and timers (called on resume after a pause)."""
+        self.climbing = None
         self.facing: Optional[str] = None      # unknown until we turn or walk
         self.walking: Optional[str] = None
         self._patrol_dir: str = RIGHT          # direction to resume patrolling in
@@ -99,6 +105,21 @@ class Behavior:
         self._ahead: Optional[Tuple[Mob, float]] = None   # (mob, t) last in-range mob ahead
         self._approach_seen: float = -math.inf   # last time a mob was seen ahead while walking
         self._stuck_ref: Optional[Tuple[float, float]] = None   # (x, t) last movement
+        self._navigation = Navigation(self.settings, self.map)
+        self._style = PlayTiming(self.settings)
+        self._retreat.settled_since = None
+        self._retreat.last_position = None
+        self._motion = None
+        self._vx = 0.0
+        self._observation_gap = 0.0
+        self._last_hp = None
+        self._hit_until = -math.inf
+        self._last_pickup = -math.inf
+        self._loot_target = None
+        self._loot_started = None
+        self._loot_seen = -math.inf
+        self._loot_attempts = 0
+        self._loot_ignored = []
         self._off_since: Optional[float] = None  # first tick y was off the training band
 
     def update_settings(self, settings: Settings) -> None:
@@ -107,21 +128,48 @@ class Behavior:
         new_map = MapModel.from_settings(settings)
         self.map = new_map
         self.settings = settings
+        self._navigation = Navigation(settings, new_map)
+        self._retreat.settings = settings
+        self._style = PlayTiming(settings)
 
     def decide(self, p: Perception, now: float) -> Decision:
         x = self._map_x(p)
+        self._track_motion(p, now)
         self._track_movement(x, now)
+        self._retreat.observe(p, now)
         d = (self._rule_wait_confidence(p)
+             or self._rule_inventory(p)
+             or self._rule_retreat_deadline(now)
              or self._rule_recover(p, now)
+             or self._rule_wait_stock(p)
              or self._rule_wait_minimap(x)
+             or self._rule_transit(p, now)
+             or self._rule_knockback(p, now)
+             or self._rule_edge(p, now)
+             or self._rule_retreat(p, now)
+             or self._rule_loot_at_feet(p, now)
              or self._rule_engage(p, now)
+             or self._rule_cast_lock(now)
+             or self._rule_loot(p, now)
+             or self._navigation.decide(p, now)
              or self._rule_off_platform(p, now)
              or self._rule_patrol(p, x, now))  # type: ignore[arg-type]
+        # Combat/resource/loot interruptions suspend approach timing explicitly;
+        # a slow capture rate alone must never reset a stuck-navigation deadline.
+        if (self._navigation.approach is not None and self._navigation.active is None and
+                d.state in ("ENGAGE", "CASTING", "KNOCKBACK", "RECOVER", "WAIT", "LOOT")):
+            self._navigation.approach = (self._navigation.approach[0], now)
+        if self._retreat.reason:
+            d = replace(d, retreat_reason=self._retreat.reason)
         self._apply(d.action, x, now)
         return d
 
     # ------------------------------------------------------------------ rules
     def _rule_wait_confidence(self, p: Perception) -> Optional[Decision]:
+        if Flag.VIEW_CHANGED in p.flags:
+            return Decision(Action.STOP_WALK,"WAIT",reason="Game view size changed; redo calibration")
+        if Flag.UNEXPECTED_DIALOG in p.flags or Flag.ALERT_MATCH in p.flags:
+            return Decision(Action.STOP_WALK, "WAIT", reason="Unexpected dialog; manual review required")
         if p.confidence <= MIN_CONFIDENCE or Flag.LOW_CONFIDENCE in p.flags:
             return self._wait(f"low confidence ({p.confidence:.2f})")
         return None
@@ -131,11 +179,11 @@ class Behavior:
         keys = self.settings.keys
         cd = pots.cooldown_s
         if (p.hp is not None and p.hp < pots.hp_below and keys.hp_potion
-                and now - self._last_hp_pot >= cd):
+                and self._retreat.can_use("hp") and now - self._last_hp_pot >= cd):
             return Decision(Action.USE_HP_POT, "RECOVER",
                             reason=f"HP {_pct(p.hp)} < {_pct(pots.hp_below)}")
         if (p.mp is not None and p.mp < pots.mp_below and keys.mp_potion
-                and now - self._last_mp_pot >= cd):
+                and self._retreat.can_use("mp") and now - self._last_mp_pot >= cd):
             return Decision(Action.USE_MP_POT, "RECOVER",
                             reason=f"MP {_pct(p.mp)} < {_pct(pots.mp_below)}")
         return None
@@ -157,6 +205,8 @@ class Behavior:
         where = f"mob {abs(dx)}px {_side(dx)}" if abs(dx) > DEAD_ZONE_PX else "mob on top of us"
         if self.walking:
             return Decision(Action.STOP_WALK, "ENGAGE", target, f"stop: {where}")
+        if not self._style.ready(now):
+            return Decision(Action.IDLE, "ENGAGE", target, "Reaction delay before engagement")
         if abs(dx) > DEAD_ZONE_PX:
             need = _side(dx)
         elif self.facing is not None:
@@ -164,6 +214,8 @@ class Behavior:
         else:
             need = RIGHT if dx >= 0 else LEFT        # dead zone, facing unknown: pick one
         if need != self.facing:
+            if now - self._last_attack < self.settings.skill.animation_lock_s:
+                return Decision(Action.IDLE, "ENGAGE", target, "Waiting for spell before turning")
             if self.facing is None:
                 where += ", facing unknown"
             self._ahead = (target, now)      # it will be ahead once we've turned
@@ -173,7 +225,7 @@ class Behavior:
             # it may have died or walked past us.
             return Decision(Action.IDLE, "ENGAGE", target, f"holding facing, {where} (last seen)")
         since = now - self._last_attack
-        cd = self.settings.skill.cooldown_s
+        cd = max(self.settings.skill.cooldown_s, self.settings.skill.animation_lock_s) + self._style.cast_extra
         if since >= cd:
             return Decision(Action.ATTACK, "ENGAGE", target, f"attack {where}")
         return Decision(Action.IDLE, "ENGAGE", target,
@@ -191,7 +243,7 @@ class Behavior:
 
     def _rule_off_platform(self, p: Perception, now: float) -> Optional[Decision]:
         m = self.map
-        if m.patrol_y is None:
+        if m.patrol_y is None and not m.explicit:
             return None
         x, y = p.player_map                         # type: ignore[misc]
         if m.on_platform(x, y):
@@ -199,7 +251,8 @@ class Behavior:
             return None
         if self._off_since is None:
             self._off_since = now
-        why = f"not on the training bridge (y {y:.2f} vs {m.patrol_y:.2f})"
+        why = (f"not on a known platform (y {y:.2f})" if m.explicit else
+               f"not on the training bridge (y {y:.2f} vs {m.patrol_y:.2f})")
         if not self.walking:
             return Decision(Action.IDLE, "OFF_PLATFORM", reason=why)   # never start a walk
         debounce = getattr(self.settings.behavior, "off_platform_debounce_s",
@@ -222,7 +275,7 @@ class Behavior:
 
     # ------------------------------------------------------------------ helpers
     def _wait(self, why: str) -> Decision:
-        if self.walking:
+        if self.walking or self.climbing:
             return Decision(Action.STOP_WALK, "WAIT", reason=why)
         return Decision(Action.IDLE, "WAIT", reason=why)
 
@@ -286,10 +339,11 @@ class Behavior:
 
     def _patrol_choice(self, p: Perception, x: float, now: float) -> Tuple[str, str, Optional[Mob]]:
         """(direction to walk, reason, mob being approached or None)."""
-        if x <= self.map.patrol_left:
+        left, right = self._safe_bounds(p)
+        if x <= left:
             self._edge_block = LEFT
             return RIGHT, "reached left edge", None
-        if x >= self.map.patrol_right:
+        if x >= right:
             self._edge_block = RIGHT
             return LEFT, "reached right edge", None
         mob = self._approach_target(p, now)
@@ -340,12 +394,18 @@ class Behavior:
 
     def _apply(self, action: Action, x: Optional[float], now: float) -> None:
         """Update beliefs exactly like the Controller does, plus timers."""
-        if action in (Action.WALK_LEFT, Action.WALK_RIGHT):
-            d = LEFT if action is Action.WALK_LEFT else RIGHT
+        self._retreat.note_action(action)
+        if action in (Action.CLIMB_UP,Action.CLIMB_DOWN,Action.GRAB_UP):
+            self.walking = None
+            self.climbing = "down" if action is Action.CLIMB_DOWN else "up"
+        elif action not in (Action.IDLE,Action.USE_HP_POT,Action.USE_MP_POT,Action.PICKUP):
+            self.climbing = None
+        if action in (Action.WALK_LEFT, Action.WALK_RIGHT, Action.JUMP_LEFT, Action.JUMP_RIGHT):
+            d = LEFT if action in (Action.WALK_LEFT, Action.JUMP_LEFT) else RIGHT
             if self.walking != d:
                 self._stuck_ref = (x, now) if x is not None else None
             self.facing = self.walking = self._patrol_dir = d
-        elif action is Action.STOP_WALK:
+        elif action in (Action.STOP_WALK, Action.DROP_DOWN, Action.JUMP_UP):
             self.walking = None
             self._stuck_ref = None
         elif action in (Action.FACE_LEFT, Action.FACE_RIGHT):
@@ -356,9 +416,154 @@ class Behavior:
             self.walking = None
             self._stuck_ref = None
             self._last_attack = now
+            self._style.note_attack()
         elif action is Action.JUMP:
             self._stuck_ref = (x, now) if x is not None else None
+        elif action is Action.PICKUP:
+            self._last_pickup = now
         elif action is Action.USE_HP_POT:
             self._last_hp_pot = now
         elif action is Action.USE_MP_POT:
             self._last_mp_pot = now
+
+    def _track_motion(self, p, now):
+        if p.player_map is not None:
+            x = p.player_map[0]
+            if self._motion is not None:
+                old_x, old_t = self._motion
+                dt = now - old_t
+                self._observation_gap = max(0, dt)
+                self._vx = max(-0.8, min(0.8, (x - old_x) / dt)) if 0 < dt <= 2 else 0.0
+            self._motion = (x, now)
+        else:
+            self._motion, self._vx = None, 0.0
+        if p.hp is not None:
+            if self._last_hp is not None and p.hp < self._last_hp - 0.005:
+                self._hit_until = now + self.settings.behavior.knockback_wait_s
+            self._last_hp = p.hp
+
+    def _rule_transit(self, p, now):
+        # No navigation input until the current cast has finished.
+        if self._navigation.active is None and not self._navigation.failed:
+            return None
+        return self._navigation.decide(p, now, active_only=True)
+
+    def _rule_cast_lock(self, now):
+        if now - self._last_attack < max(self.settings.skill.animation_lock_s,
+                                         self.settings.skill.hold_s):
+            return Decision(Action.STOP_WALK if self.walking else Action.IDLE,
+                            "CASTING", reason="Waiting for spell animation")
+        return None
+
+    def _rule_knockback(self, p, now):
+        if now < self._hit_until:
+            return Decision(Action.STOP_WALK, "KNOCKBACK", reason="HP dropped; wait for knockback to settle")
+        return None
+
+    def _safe_bounds(self, p):
+        left, right = self.map.patrol_left, self.map.patrol_right
+        if self.map.explicit and p.player_map is not None:
+            pl = self.map.platform_at(*p.player_map)
+            if pl is not None:
+                left, right = pl.left, pl.right
+        margin = self.settings.behavior.edge_margin
+        if self._player_xy(p) is not None and any(abs(m.x - p.player_screen[0]) < 100
+                                                  for m in self._same_row(p)):
+            margin += self.settings.behavior.knockback_margin
+        margin = min(margin, (right - left) / 3)
+        return left + margin, right - margin
+
+    def _rule_edge(self, p, now):
+        if self.settings.behavior.edge_margin == 0 and self.settings.behavior.reaction_s == 0:
+            return None
+        if not self.walking or p.player_map is None or not self.map.on_platform(*p.player_map):
+            return None
+        # Measured navigation handles its own waypoint; do not bounce away from a walk link.
+        left, right = self._safe_bounds(p)
+        x = p.player_map[0]
+        horizon = max(self.settings.behavior.reaction_s, min(1.0, self._observation_gap * 2))
+        projected = x + self._vx * horizon
+        if (self.walking == LEFT and min(x, projected) <= left or
+                self.walking == RIGHT and max(x, projected) >= right):
+            self._edge_block = self.walking
+            self._patrol_dir = RIGHT if self.walking == LEFT else LEFT
+            return Decision(Action.STOP_WALK, "EDGE_GUARD", reason="Brake before platform edge")
+        return None
+
+    def _rule_loot_at_feet(self, p, now):
+        # A quick pickup between casts prevents continuous combat starving looting.
+        if now - self._last_attack < self.settings.skill.animation_lock_s:
+            return None
+        pos = self._player_xy(p)
+        loot = self.settings.loot
+        if pos is not None and any(abs(it.x - pos[0]) <= loot.range_px and
+                abs(it.y - pos[1] - loot.player_feet_offset_px) <= loot.floor_tolerance_px for it in p.items):
+            return self._rule_loot(p, now, allow_sweep=False)
+        return None
+
+    def _rule_loot(self, p, now, allow_sweep=True):
+        loot = self.settings.loot
+        if not loot.enabled or not self.settings.keys.pickup or not self.map.on_platform(*p.player_map):
+            return None
+        self._loot_ignored = [(pos, until) for pos, until in self._loot_ignored if now < until]
+        pos = self._player_xy(p)
+        candidates = []
+        if pos is not None:
+            feet = pos[1] + loot.player_feet_offset_px
+            candidates = [it for it in p.items if abs(it.y - feet) <= loot.floor_tolerance_px
+                          and not any(abs(it.x - old[0]) < loot.range_px and abs(it.y - old[1]) < loot.floor_tolerance_px
+                                      for old, _ in self._loot_ignored)]
+        if candidates:
+            self._loot_seen = now
+            target = min(candidates, key=lambda it: abs(it.x - pos[0]))
+            # Screen-space tracks are deliberately short-lived; camera motion cannot create a long chase.
+            if self._loot_target is None:
+                self._loot_target, self._loot_started, self._loot_attempts = target, now, 0
+            if now - self._loot_started >= loot.pursuit_s or self._loot_attempts >= loot.max_attempts:
+                self._loot_ignored.append(((target.x, target.y), now + loot.ignore_s))
+                self._loot_target = None
+                return Decision(Action.STOP_WALK, "LOOT_SKIP", reason="Drop not collectible; continue patrol")
+            dx = target.x - pos[0]
+            if abs(dx) <= loot.range_px:
+                if self.walking:
+                    return Decision(Action.STOP_WALK, "LOOT", reason="Stop over drop")
+                if now - self._last_pickup >= loot.pickup_interval_s:
+                    self._loot_attempts += 1
+                    return Decision(Action.PICKUP, "LOOT", reason=f"Collect {target.template}")
+                return Decision(Action.IDLE, "LOOT", reason="Waiting between pickups")
+            left, right = self._safe_bounds(p)
+            x = p.player_map[0]
+            if dx < 0 and x > left or dx > 0 and x < right:
+                return Decision(Action.WALK_LEFT if dx < 0 else Action.WALK_RIGHT,
+                                "LOOT", reason="Approach same-floor drop")
+        elif now - self._loot_seen > min(1.5, loot.pursuit_s):
+            self._loot_target = None
+        if allow_sweep and now - self._last_pickup >= loot.pickup_interval_s:
+            return Decision(Action.PICKUP, "LOOT_SWEEP", reason="Collect nearby drops while patrolling")
+        return None
+
+    def _rule_retreat(self, p, now):
+        if not self._retreat.reason:
+            return None
+        return self._rule_cast_lock(now) or self._retreat.decide(p, now, self.map, self._navigation)
+
+    @property
+    def potion_estimates(self):
+        return self._retreat.hp_remaining, self._retreat.mp_remaining
+
+    def _rule_retreat_deadline(self, now):
+        state = self._retreat
+        if (state.reason and not state.arrived and state.started is not None and
+                now-state.started >= self.settings.retreat.timeout_s):
+            return Decision(Action.STOP_WALK, "RETREAT_FAILED", reason="Safe-spot retreat exceeded its deadline")
+        return None
+
+    def _rule_inventory(self, p):
+        if p.inventory_full and not self._retreat.reason:
+            return Decision(Action.STOP_WALK,"INVENTORY_FULL",reason="Inventory full; clear it manually")
+        return None
+
+    def _rule_wait_stock(self, p):
+        if Flag.STOCK_UNREADABLE in p.flags and not self._retreat.reason:
+            return Decision(Action.STOP_WALK,"WAIT",reason="Awaiting fresh confirmed potion OCR")
+        return None

@@ -19,3 +19,9 @@ configs/local*.yaml
 build/
 dist/
 reports/eval_*.csv
+
+# downloaded upstream asset catalogs (not redistributed)
+data/reference-*/
+data/asset-packs/
+
+data/reference-banks/

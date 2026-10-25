@@ -34,6 +34,10 @@ def perc(t=0.0, map_x=0.5, mobs=(), player=(PLAYER_X, PLAYER_Y), hp=1.0, mp=1.0,
 
 def make_settings(**over):
     s = Settings()
+    s.loot.enabled = False
+    s.behavior.edge_margin = 0
+    s.behavior.reaction_s = 0
+    s.behavior.knockback_wait_s = 0
     s.keys.hp_potion = over.pop("hp_key", "")
     s.keys.mp_potion = over.pop("mp_key", "")
     for k, v in over.items():

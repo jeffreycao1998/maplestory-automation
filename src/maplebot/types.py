@@ -35,9 +35,24 @@ class Mob:
     template: str                        # template file name it matched
 
 
+@dataclass(frozen=True)
+class Item:
+    x: int
+    y: int
+    w: int
+    h: int
+    score: float
+    template: str
+
+
 class Flag(str, Enum):
     MINIMAP_MISSING = "minimap_missing"  # minimap box doesn't look like a minimap / dot absent
     PLAYER_OFFSCREEN = "player_offscreen"  # player template configured but not found
+    UNEXPECTED_DIALOG = "unexpected_dialog"
+    ALERT_MATCH = "alert_match"
+    INVENTORY_FULL = "inventory_full"
+    STOCK_UNREADABLE = "stock_unreadable"
+    VIEW_CHANGED = "view_changed"
     LOW_CONFIDENCE = "low_confidence"
 
 
@@ -53,6 +68,12 @@ class Perception:
     mp: Optional[float]
     flags: frozenset = field(default_factory=frozenset)   # set of Flag
     confidence: float = 1.0              # 0..1
+    items: Tuple[Item, ...] = ()
+    hp_stock: Optional[int] = None
+    mp_stock: Optional[int] = None
+    mesos: Optional[int] = None
+    inventory_full: Optional[bool] = None
+    hud_t: Optional[float] = None
 
 
 class Action(str, Enum):
@@ -64,6 +85,14 @@ class Action(str, Enum):
     WALK_RIGHT = "walk_right"
     STOP_WALK = "stop_walk"
     JUMP = "jump"
+    JUMP_UP = "jump_up"                # stop horizontal travel before jumping
+    JUMP_LEFT = "jump_left"
+    JUMP_RIGHT = "jump_right"
+    DROP_DOWN = "drop_down"
+    CLIMB_UP = "climb_up"
+    CLIMB_DOWN = "climb_down"
+    GRAB_UP = "grab_up"
+    PICKUP = "pickup"
     USE_HP_POT = "use_hp_pot"
     USE_MP_POT = "use_mp_pot"
 
@@ -74,6 +103,9 @@ class Decision:
     state: str                           # behaviour state name, e.g. "PATROL", "ENGAGE"
     target: Optional[Mob] = None
     reason: str = ""
+    transition: Optional[str] = None
+    retreat_reason: str = ""
+    route: Tuple[str, ...] = ()
 
 
 class VerdictKind(str, Enum):
@@ -104,4 +136,11 @@ class Status:
     runtime_s: float = 0.0
     attacks: int = 0
     countdown_s: Optional[float] = None  # seconds left before the bot starts acting, else None
+    hp_pots_estimated: Optional[int] = None
+    mp_pots_estimated: Optional[int] = None
+    hp_stock: Optional[int] = None
+    mp_stock: Optional[int] = None
+    observe_only: bool = False
+    wallet_delta: Optional[int] = None
+    net_per_hour: Optional[float] = None
     hotkeys_ok: bool = True              # False if F11/F12 aren't working (use the app's buttons)
