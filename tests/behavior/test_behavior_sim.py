@@ -16,7 +16,7 @@ def test_sixty_second_run(seed):
     assert r.max_overshoot <= OVERSHOOT_MAX, r
     assert r.max_facing_changes_per_s <= 3, r.facing_changes
     assert r.jumps == 0                                  # nothing to get stuck on
-    assert set(r.states) <= {"PATROL", "ENGAGE"}      # sagging bridge: no OFF_PLATFORM
+    assert set(r.states) <= {"PATROL", "ENGAGE", "CASTING", "EDGE_GUARD", "LOOT_SWEEP"}      # sagging bridge: no OFF_PLATFORM
     # it patrols most of the 0.30..0.70 zone, not just one spot
     assert r.max_map_x - r.min_map_x >= 0.3
 
@@ -96,7 +96,7 @@ def test_fall_to_bridge_below_stops_walking(seed, sag):
     assert r.fall_detect_delay_s is not None and r.fall_detect_delay_s <= 3.0
     assert r.walk_ticks_after_fall == 0          # never walks on the wrong bridge
     # only stands (OFF_PLATFORM) or shoots mobs in range (ENGAGE) until the supervisor pauses
-    assert set(r.states_after_fall) <= {"OFF_PLATFORM", "ENGAGE"}
+    assert set(r.states_after_fall) <= {"OFF_PLATFORM", "ENGAGE", "CASTING"}
     assert r.states_after_fall.get("OFF_PLATFORM", 0) > 0
 
 

@@ -351,12 +351,12 @@ def ctx(**kw):
 def test_wizard_steps_shape():
     keys = [s.key for s in L.WIZARD_STEPS]
     assert keys == ["window", "screenshot", "minimap", "dot", "mobs", "player", "bars",
-                    "patrol", "keys", "summary"]
-    assert not [s.key for s in L.WIZARD_STEPS if s.optional]   # name tag + HP bar required
+                    "supplies", "patrol", "keys", "summary"]
+    assert [s.key for s in L.WIZARD_STEPS if s.optional] == ["supplies"]  # name tag + HP bar still required
     for s in L.WIZARD_STEPS:
         assert 10 < len(s.instruction) < 320
-    assert L.step_label(0) == "Step 1 of 10: Game window"
-    assert L.step_index("patrol") == 7
+    assert L.step_label(0) == "Step 1 of 11: Game window"
+    assert L.step_index("patrol") == 8
 
 
 def test_step_window():

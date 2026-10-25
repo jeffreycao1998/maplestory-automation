@@ -15,8 +15,8 @@ held for each action:
 Safety guarantees
 - Every key this Controller presses is tracked in ``held_keys``. A key is tracked
   *before* the OS call, so even a half-failed press gets a release later.
-- Taps use try/finally; if anything inside ``execute`` raises, every key that was not
-  held before the call is released before the exception propagates.
+- Taps use try/finally; if anything inside ``execute`` raises, all tracked keys
+  (including an existing walk) are released before the exception propagates.
 - ``release_all()`` is idempotent and never raises; a failed release stays tracked
   and is retried next time.
 - Released on ``__exit__``, ``close()`` and interpreter exit (atexit, weakref-safe).
@@ -54,6 +54,9 @@ class _Binds:
     jump: str
     left: str
     right: str
+    up: str
+    down: str
+    pickup: Optional[str]
     hp_potion: Optional[str]
     mp_potion: Optional[str]
 
@@ -61,12 +64,12 @@ class _Binds:
 def _resolve_keys(settings: Settings) -> _Binds:
     k = settings.keys
     out: Dict[str, Optional[str]] = {}
-    for field in ("attack", "jump", "left", "right"):
+    for field in ("attack", "jump", "left", "right", "up", "down"):
         try:
             out[field] = normalize_key(getattr(k, field))
         except ValueError as e:
             raise ValueError(f"{field.replace('_', ' ').capitalize()} key: {e}") from None
-    for field in ("hp_potion", "mp_potion"):
+    for field in ("hp_potion", "mp_potion", "pickup"):
         raw = getattr(k, field)
         if raw is None or (isinstance(raw, str) and raw.strip() == ""):
             out[field] = None
@@ -94,16 +97,34 @@ def _atexit_release(ref: "weakref.ReferenceType[Controller]") -> None:
         ctrl.release_all()
 
 
+class InputBlocked(RuntimeError):
+    """Focus could not be verified; release keys and require manual resume."""
+
+
 class Controller:
     def __init__(self, settings: Settings, backend: InputBackend,
-                 sleep: Callable[[float], None] = time.sleep) -> None:
+                 sleep: Callable[[float], None] = time.sleep,
+                 can_press: Optional[Callable[[], bool]] = None,
+                 movement_timeout_s: Optional[float] = None,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._movement_timeout = movement_timeout_s
+        if movement_timeout_s is not None and (not isinstance(movement_timeout_s,(float,int)) or
+                not 0.02 <= movement_timeout_s <= 5):
+            raise ValueError("Movement input timeout must be 0.02..5 seconds")
+        self._last_tick = clock()
+        self._watchdog_stop = threading.Event()
+        self._watchdog = None
+        self._can_press = can_press
         self._backend = backend
         self._sleep = sleep
         self._lock = threading.RLock()
         self._held: Set[str] = set()
         self.facing: str = "right"        # contract: "left" | "right"
         self._facing_known = False        # first FACE_* always taps (true facing unknown)
+        self.climbing: Optional[str] = None
         self.walking: Optional[str] = None
+        self._cast_until = -float("inf")
         self.last_action: Optional[Action] = None
         self.last_action_t: Optional[float] = None
         self._inhibited = False
@@ -113,6 +134,9 @@ class Controller:
         self._atexit_cb = lambda ref=weakref.ref(self): _atexit_release(ref)
         atexit.register(self._atexit_cb)
         self._closed = False
+        if movement_timeout_s is not None:
+            self._watchdog = threading.Thread(target=self._watch_movement,name="input-deadman",daemon=True)
+            self._watchdog.start()
 
     # ---- public -----------------------------------------------------------
     @property
@@ -158,6 +182,17 @@ class Controller:
             self._inhibit_reason = reason
             self.release_all()
 
+    @property
+    def inhibit_reason(self):
+        return self._inhibit_reason
+
+    def _watch_movement(self):
+        while not self._watchdog_stop.wait(min(.05,self._movement_timeout/2)):
+            with self._lock:
+                movement = {self._binds.left,self._binds.right,self._binds.up,self._binds.down}
+                if not self._inhibited and self._held.intersection(movement) and self._clock()-self._last_tick > self._movement_timeout:
+                    self.inhibit("Movement input lease expired: capture/decision loop stalled")
+
     def allow(self) -> None:
         """Re-enable execute() after inhibit() (e.g. when the user resumes).
 
@@ -165,9 +200,12 @@ class Controller:
         real facing is unknown again: the next FACE_* always taps.
         """
         with self._lock:
+            if self._closed:
+                return
             self._inhibited = False
             self._inhibit_reason = ""
             self._facing_known = False
+            self._last_tick = self._clock()
 
     def execute(self, action: Action, now: float) -> None:
         """Perform one Action. A no-op (zero key events) while inhibited.
@@ -180,13 +218,21 @@ class Controller:
         with self._lock:
             if self._inhibited:
                 return
-            before = set(self._held)
+            self._last_tick = self._clock()
+            self._check_foreground()
+            if now < self._cast_until and action in (Action.JUMP, Action.JUMP_UP, Action.JUMP_LEFT,
+                    Action.JUMP_RIGHT, Action.DROP_DOWN, Action.WALK_LEFT, Action.WALK_RIGHT,
+                    Action.FACE_LEFT, Action.FACE_RIGHT, Action.CLIMB_UP, Action.CLIMB_DOWN, Action.GRAB_UP):
+                self._stop_walk()
+                return
             try:
                 self._dispatch(action)
+                if action is Action.ATTACK:
+                    self._cast_until = now + max(self._settings.skill.animation_lock_s,
+                                                 self._settings.skill.hold_s)
             except BaseException:
-                # Never leave a key down that this call pressed.
-                for key in list(self._held - before):
-                    self._safe_up(key)
+                # An aborted action must not leave a previous walk running either.
+                self.release_all()
                 if self.walking is not None and self._dir_key(self.walking) not in self._held:
                     self.walking = None
                 raise
@@ -201,12 +247,16 @@ class Controller:
                 for key in sorted(self._held):
                     self._safe_up(key)
                 self.walking = None
+                self.climbing = None
         except BaseException:   # pragma: no cover - last-resort guard
             log.exception("release_all failed unexpectedly")
 
     def close(self) -> None:
         """Inhibit (release everything, block further presses) and drop the atexit hook."""
         self.inhibit("controller closed")
+        self._watchdog_stop.set()
+        if self._watchdog is not None and threading.current_thread() is not self._watchdog:
+            self._watchdog.join(timeout=.2)
         if not self._closed:
             self._closed = True
             try:
@@ -218,7 +268,7 @@ class Controller:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        self.release_all()
+        self.close()
 
     # ---- action handlers ----------------------------------------------------
     def _dispatch(self, action: Action) -> None:
@@ -241,6 +291,27 @@ class Controller:
         elif action is Action.JUMP:
             self._tap(b.jump, self._tap_s(self._settings.behavior, "jump_tap_s",
                                           DEFAULT_JUMP_TAP_S))
+        elif action is Action.JUMP_UP:
+            self._stop_walk()
+            self._tap(b.jump, self._settings.behavior.jump_tap_s)
+        elif action in (Action.JUMP_LEFT, Action.JUMP_RIGHT):
+            self._walk("left" if action is Action.JUMP_LEFT else "right")
+            self._tap(b.jump, self._settings.behavior.jump_tap_s)
+        elif action is Action.DROP_DOWN:
+            self._stop_walk()
+            try:
+                self._down(b.down)
+                self._sleep(self._settings.behavior.drop_setup_s)
+                self._tap(b.jump, self._settings.behavior.jump_tap_s)
+            finally:
+                self._up(b.down)
+        elif action in (Action.CLIMB_UP, Action.CLIMB_DOWN, Action.GRAB_UP):
+            self._climb("down" if action is Action.CLIMB_DOWN else "up")
+            if action is Action.GRAB_UP:
+                self._tap(b.jump, self._settings.behavior.jump_tap_s)
+        elif action is Action.PICKUP:
+            if b.pickup:
+                self._tap(b.pickup, self._settings.loot.tap_s)
         elif action is Action.USE_HP_POT:
             if b.hp_potion:
                 self._tap(b.hp_potion, self._pot_tap_s())
@@ -251,6 +322,7 @@ class Controller:
             raise ValueError(f"Controller has no handler for {action!r}")
 
     def _walk(self, direction: str) -> None:
+        self._stop_climb()
         if self.walking == direction and self._dir_key(direction) in self._held:
             return
         other = "right" if direction == "left" else "left"
@@ -264,11 +336,26 @@ class Controller:
         self._facing_known = True
 
     def _stop_walk(self) -> None:
+        self._stop_climb()
         for d in ("left", "right"):
             key = self._dir_key(d)
             if key in self._held:
                 self._up(key)
         self.walking = None
+
+    def _stop_climb(self) -> None:
+        for key in (self._binds.up,self._binds.down):
+            if key in self._held:
+                self._up(key)
+        self.climbing = None
+
+    def _climb(self, direction):
+        key = self._binds.up if direction == "up" else self._binds.down
+        if self.climbing == direction and key in self._held:
+            return
+        self._stop_walk()
+        self._down(key)
+        self.climbing = direction
 
     def _face(self, direction: str) -> None:
         self._stop_walk()
@@ -282,7 +369,19 @@ class Controller:
     def _dir_key(self, direction: str) -> str:
         return self._binds.left if direction == "left" else self._binds.right
 
+    def _check_foreground(self) -> None:
+        if self._can_press is None:
+            return
+        try:
+            allowed = bool(self._can_press())
+        except Exception:
+            allowed = False
+        if not allowed:
+            self.inhibit("Game window lost focus")
+            raise InputBlocked("Game window lost focus or could not be verified; manual resume required")
+
     def _down(self, key: str) -> None:
+        self._check_foreground()
         self._held.add(key)          # track first: a half-failed press still gets released
         self._backend.key_down(key)
 

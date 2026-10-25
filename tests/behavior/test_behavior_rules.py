@@ -219,7 +219,7 @@ def test_flicker_of_mob_ahead_does_not_turn_us():
     d = b.decide(perc(mobs=[X - 150]), 0.07)              # right mob missed one frame
     assert d.action is A.IDLE and b.facing == "right"
     assert "last seen" in d.reason
-    d = b.decide(perc(mobs=[X - 150]), 0.07 + TURN_HOLD_S)   # gone for good -> turn
+    d = b.decide(perc(mobs=[X - 150]), max(0.07 + TURN_HOLD_S, b.settings.skill.animation_lock_s))  # gone; cast finished
     assert d.action is A.FACE_LEFT
 
 

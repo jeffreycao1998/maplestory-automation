@@ -186,3 +186,83 @@ class Profile:
     def delete_map(self, map_id: str) -> None        # not the only map
 class MapError(ValueError)                           # user-facing message
 ```
+
+## Navigation and loot extension
+
+`Calibration.platforms` contains named walkable polylines in minimap fractions;
+`connections` contains directed, explicitly measured walk/jump/drop links, and
+`route` is an optional repeating list of platform names. Empty geometry preserves
+existing profiles. No route is inferred across unknown gaps. `Platform.height_at(x)`
+interpolates ramps/bridge sag. Movement reserves a configurable edge margin and
+reaction distance, with extra clearance near mobs and after observed damage.
+
+Actions add `JUMP_UP` (stop horizontal travel), `JUMP_LEFT`, `JUMP_RIGHT`, `DROP_DOWN` (stop, hold down, tap jump,
+release both), and `PICKUP`. Behavior and Controller both enforce the configured
+spell animation lock before movement/jumping. All composite input uses the existing
+tracked-key/finally/release-on-pause machinery.
+
+`Perception.items` is a tuple of `Item` detections using optional per-map
+`item_*.png` references. Loot uses same-floor targets, bounded pursuit/pickup attempts,
+then ignores an uncollectable location temporarily. Without references it still taps
+the configured pickup key periodically while patrolling. Potion and safety rules win.
+
+`Decision.transition` identifies the configured connection being executed. Supervisor
+allows only its bounded flight window outside known platforms; a failed landing or
+navigation timeout pauses. It never exempts missing-player/HP/confidence checks.
+Setup auto-detection proposes minimap and framed HP/MP regions for visual review;
+it does not silently change live calibration or identify arbitrary mobs/characters.
+
+Imported RGBA sprites use a separate alpha-masked matcher with coarse proposals and
+bounded colour verification. Downloaded reference packs record provenance and remain
+local. Offline map XML import preserves footholds/ladders and emits unactivated geometry
+candidates; no pixel-to-world alignment is silently assumed in the live runner.
+
+## Safe spot, retreat and input safeguards
+
+`Calibration.safe_spot` is an optional minimap `[x,y]` marker on a known surface.
+Retreat uses directed measured connections to its platform, then walks to the marker
+and requires a stable arrival before pausing. A global retreat deadline and unreachable
+route failures pause in place. Existing critical HP/confidence/navigation checks still win.
+`Retreat` settings contain reserve thresholds, optional manually supplied HP/MP stock
+at run start, low-resource triggers and a deadline. Stock is an estimate reduced by
+potion action attempts; it is preserved across pause/resume, as is a latched retreat.
+Those attempt estimates are not proof of inventory consumption. The optional fresh HUD OCR described below can correct them; runs without OCR need accurate starting stock.
+`Decision.retreat_reason` carries retreat intent through existing NAV_* decisions so
+Supervisor can allow travel without disabling its landing checks. Arrival/failure pause.
+
+Optional `PlayStyle` delays first engagement and adds positive cast-spacing variation;
+its seeded timings are repeatable in replay. It never delays potions, retreat, edge
+braking, flight correction or stop checks and never shortens the spell animation lock.
+
+Live Controller input can receive a foreground guard, checked on each execute and
+before every key-down. Failure releases keys and pauses, never refocuses the game.
+Perception can flag a conservative central modal candidate or a configured `alert_*.png`
+reference. These cause immediate manual-review pauses; no dialog is solved/dismissed.
+The guards do not establish that automation is undetectable.
+
+## Reliability expansion contracts
+
+Perception adds optional fresh, confirmed `hp_stock`, `mp_stock`, `mesos`, `inventory_full`
+and `hud_t`. OCR runs in one bounded background worker on configured HUD crops. Unknown
+or stale values are None. Distinct OCR samples must agree before numbers are trusted;
+notifications never interact with verification dialogs. Visible stock is authoritative
+for reserve checks while fresh, with estimated attempts retained as a conservative fallback.
+Configured but unreadable stock stops ordinary actions and eventually pauses.
+
+Observe-only runners use a fake backend regardless of a supplied real backend. Decisions,
+watchdogs, route overlay and logs still run, but no game key is sent. Status/summary label
+this mode; simulated actions never imply actual potion spending or pickup success.
+
+Map geometry adds named vertical ladders/ropes and `climb` connections. `CLIMB_UP/DOWN`
+hold one vertical key; `GRAB_UP` holds Up while tapping Jump. STOP_WALK and all exits
+release horizontal and vertical movement. Navigation validates a connection against the
+ladder and both surfaces, verifies progress and a stable destination, and times out.
+
+Economy observes wallet changes and decreases in visible potion stock. Replacement-cost
+estimates require user-provided prices; unknown costs/observations yield unknown net,
+not zero. Reports state these assumptions. Pickup presses are counted only as attempts.
+
+Live Controller movement can have an independent wall-clock lease. If main-loop
+updates stop while a directional key is held, a daemon watchdog inhibits input and
+releases movement. Closing/context exit terminates the watcher and cannot be undone
+by allow(). A saved reference view size also causes an immediate pause after resize.

@@ -41,8 +41,8 @@ def test_start_state():
 
 
 def test_step_label_and_title_mention_map():
-    assert L.step_label(2, "Pig Beach") == "Setting up: Pig Beach -- Step 3 of 10: Minimap"
-    assert L.step_label(2) == "Step 3 of 10: Minimap"
+    assert L.step_label(2, "Pig Beach") == "Setting up: Pig Beach -- Step 3 of 11: Minimap"
+    assert L.step_label(2) == "Step 3 of 11: Minimap"
     assert L.wizard_title("Pig Beach") == "Setting up: Pig Beach"
 
 

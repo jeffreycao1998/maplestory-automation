@@ -1,0 +1,6 @@
+{
+  "source": "000001.png",
+  "note": "Manually checked visible shortcut numbers; potion identity must be assigned from the user's own keybinds, not guessed from these icons.",
+  "shortcut_shift": {"box": [940, 649, 13, 12], "text": "15"},
+  "shortcut_ctrl": {"box": [940, 683, 13, 12], "text": "19"}
+}

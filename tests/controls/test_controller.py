@@ -195,7 +195,9 @@ def test_custom_keybinds_are_normalized(clock):
     s.keys.left = "a"
     s.keys.right = "d"
     c, b = make(s, clock)
-    ex(c, Action.ATTACK, Action.JUMP, Action.WALK_LEFT)
+    c.execute(Action.ATTACK, 0.0)
+    c.execute(Action.JUMP, 1.0)
+    c.execute(Action.WALK_LEFT, 1.1)
     assert b.sequence() == [("z", DOWN), ("z", UP), ("space", DOWN), ("space", UP), ("a", DOWN)]
 
 
@@ -274,8 +276,8 @@ def test_exception_during_hold_releases_tapped_key(settings, clock):
     ex(c, Action.WALK_RIGHT)
     with pytest.raises(KeyboardInterrupt):
         ex(c, Action.JUMP)
-    # the tapped key is released by the failing call itself; the walk stays held
-    assert b.held == {"right"}
+    # A failed input aborts the action and releases the existing walk as well.
+    assert b.held == set()
     c.release_all()
     assert b.held == set()
 

@@ -176,6 +176,11 @@ class ImageCanvas(ttk.Frame):
                 cx, cy = v.to_canvas(x + 0.5, y + 0.5)
                 r = max(6, int(3 * v.scale))
                 self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r, outline=colour, width=3)
+            elif kind == "polyline":
+                _, points, colour = ov
+                if len(points) >= 2:
+                    coords = [coord for point in points for coord in v.to_canvas(*point)]
+                    self.canvas.create_line(*coords, fill=colour, width=2)
             elif kind == "vline":
                 _, x, (y0, y1), colour = ov
                 cx0, cy0 = v.to_canvas(x, y0)

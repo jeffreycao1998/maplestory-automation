@@ -1,5 +1,5 @@
 """
-Setup wizard: one window, Back / Next, ten steps (see ``logic.WIZARD_STEPS``).
+Setup wizard: one window, Back / Next, eleven steps (see ``logic.WIZARD_STEPS``).
 
 Everything the user selects on a screenshot is converted back to real game-client
 pixels by ``logic.View``. Mob / name-tag crops are written straight to
@@ -8,6 +8,7 @@ pixels by ``logic.View``. Mob / name-tag crops are written straight to
 from __future__ import annotations
 
 import logging
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
@@ -58,6 +59,7 @@ class SetupWizard(tk.Toplevel):
         self.patrol_image = None      # last screenshot taken in the patrol step
         self.step = 0
         self.busy = False
+        self._hud_preview = None
         self._thumbs = []             # keep PhotoImage refs alive
         self.bar_target = tk.StringVar(value="hp")
 
@@ -109,6 +111,7 @@ class SetupWizard(tk.Toplevel):
         self.msg.config(text=text, foreground="#c00000")
 
     def show_step(self, i: int):
+        self._stop_hud_preview()
         self.step = max(0, min(i, len(WIZARD_STEPS) - 1))
         st = WIZARD_STEPS[self.step]
         self.step_lbl.config(text=logic.step_label(self.step, self.map_name))
@@ -222,6 +225,73 @@ class SetupWizard(tk.Toplevel):
                             .replace("F12", self.s.safety.stop_hotkey.upper()), parent=self)
         self.destroy()
 
+    def _stop_hud_preview(self):
+        reader = getattr(self,"_hud_preview",None)
+        if reader is not None:
+            reader.close()
+            self._hud_preview = None
+
+    def destroy(self):
+        self._stop_hud_preview()
+        super().destroy()
+
+    def _build_supplies(self, f):
+        if not self._need_screenshot(f):
+            return
+        options = {"HP potion count":"hp_stock_box", "MP potion count":"mp_stock_box",
+                   "Meso balance":"mesos_box", "Notifications":"notification_box"}
+        self.hud_options = options
+        self.hud_target = tk.StringVar(value="HP potion count")
+        bar = ttk.Frame(f); bar.pack(fill="x",pady=4)
+        ttk.Combobox(bar,textvariable=self.hud_target,values=list(options),state="readonly",width=24).pack(side="left")
+        ttk.Button(bar,text="Clear region",command=self._clear_hud_region).pack(side="left",padx=6)
+        ttk.Button(bar,text="Test OCR",command=self._test_hud).pack(side="left")
+        self._retake_button(bar,self._redraw_hud).pack(side="left",padx=6)
+        self.hud_enable = tk.BooleanVar(value=self.s.ocr.enabled)
+        ttk.Checkbutton(f,text="Enable local HUD OCR (install the OCR extra first)",variable=self.hud_enable,
+                        command=lambda:setattr(self.s.ocr,"enabled",self.hud_enable.get())).pack(anchor="w")
+        self.canvas = ImageCanvas(f,self.canvas_w,self.canvas_h-60);self.canvas.pack()
+        self.canvas.mode="box";self.canvas.on_box=self._got_hud_region
+        self._redraw_hud()
+
+    def _redraw_hud(self):
+        self.canvas.overlays = self._overlays()
+        for label,field in self.hud_options.items():
+            box = getattr(self.s.calibration,field)
+            if box:
+                self.canvas.overlays.append(("box",box,CYAN,label))
+        self.canvas.show(self.image)
+
+    def _got_hud_region(self,box):
+        if box is None or box[2]<4 or box[3]<6 or box[2]>1000 or box[3]>300:
+            self.error("Draw a small box around the complete count or message text.")
+            return
+        setattr(self.s.calibration,self.hud_options[self.hud_target.get()],list(box))
+        self._redraw_hud()
+
+    def _clear_hud_region(self):
+        setattr(self.s.calibration,self.hud_options[self.hud_target.get()],None)
+        self._redraw_hud()
+
+    def _test_hud(self):
+        self._stop_hud_preview()
+        from maplebot.perception.hud import HUDReader
+        self._hud_preview = HUDReader(self.s)
+        deadline = time.monotonic()+4
+        def poll():
+            reader = self._hud_preview
+            if reader is None or not self.winfo_exists() or self.key()!="supplies":
+                self._stop_hud_preview();return
+            snapshot = reader.poll(self.image,time.monotonic())
+            if any(key in snapshot for key in ("hp_stock","mp_stock","mesos")):
+                self.info(f"Confirmed readings from this screenshot: {snapshot}. Check against the game before enabling.")
+                self._stop_hud_preview();return
+            if reader.error or time.monotonic()>=deadline:
+                self.error(reader.error or "No confirmed reading. Rebox the complete digits and retest; blank is not zero.")
+                self._stop_hud_preview();return
+            self.after(100,poll)
+        poll()
+
     # ------------------------------------------------------------ screenshots
     def take_screenshot(self, on_image: Callable[[object], None]):
         """Hide the app, count down, grab the game, restore; then on_image(image)."""
@@ -255,6 +325,7 @@ class SetupWizard(tk.Toplevel):
         self.image = image
         h, w = image.shape[:2]
         self.ctx.screenshot_size = (w, h)
+        self.s.calibration.reference_size = [w,h]
         self.session_boxes = []
         if old and old != (w, h):
             self.info(f"The game window size changed ({old[0]} x {old[1]} -> {w} x {h}). "
@@ -356,6 +427,7 @@ class SetupWizard(tk.Toplevel):
         bar = ttk.Frame(f)
         bar.pack(anchor="w", pady=(0, 6))
         self._retake_button(bar, self._redraw_minimap).pack(side="left")
+        ttk.Button(bar, text="Auto-detect minimap", command=lambda: self._auto_regions("minimap")).pack(side="left", padx=8)
         self.canvas = ImageCanvas(f, self.canvas_w, self.canvas_h)
         self.canvas.pack()
         self.canvas.mode = "box"
@@ -365,6 +437,22 @@ class SetupWizard(tk.Toplevel):
     def _redraw_minimap(self):
         self.canvas.overlays = self._overlays()
         self.canvas.show(self.image)
+
+    def _auto_regions(self, which):
+        from maplebot.perception.autosetup import suggest_regions
+        proposals = suggest_regions(self.image)
+        fields = ("minimap_box",) if which == "minimap" else ("hp_bar_box", "mp_bar_box")
+        if not all(name in proposals for name in fields):
+            self.error("No confident match. Draw the region manually; the full bar frame must be visible.")
+            return
+        for name in fields:
+            setattr(self.s.calibration, name, proposals[name])
+        if which == "minimap":
+            self._refresh_dot()
+            self._redraw_minimap()
+        else:
+            self._redraw_bars()
+        self.info("Suggested regions shown. Check the boxes and readings; drag to correct before saving.")
 
     def _got_minimap(self, box):
         if box is None:
@@ -464,6 +552,10 @@ class SetupWizard(tk.Toplevel):
         bar = ttk.Frame(f)
         bar.pack(fill="x", pady=(0, 6))
         self._retake_button(bar, self._redraw_mobs).pack(side="left")
+        self.crop_kind = tk.StringVar(value="mob")
+        ttk.Radiobutton(bar, text="Monster", variable=self.crop_kind, value="mob").pack(side="left", padx=4)
+        ttk.Radiobutton(bar, text="Drop / mesos (optional)", variable=self.crop_kind, value="item").pack(side="left", padx=4)
+        ttk.Radiobutton(bar, text="Stop alert", variable=self.crop_kind, value="alert").pack(side="left", padx=4)
         ttk.Label(bar, foreground="#555555",
                   text="  Each box is saved right away. To add another mob, just drag another box "
                        "(retake the screenshot to catch other poses).").pack(side="left")
@@ -493,7 +585,21 @@ class SetupWizard(tk.Toplevel):
         if mm and _overlaps(box, mm):
             self.error("That box is on the minimap. Draw it around a monster in the game area.")
             return
-        path = logic.next_mob_template_path(self.profile.templates_dir)
+        is_item = self.crop_kind.get() == "item"
+        is_alert = self.crop_kind.get() == "alert"
+        if is_alert:
+            self.profile.alerts_dir.mkdir(parents=True, exist_ok=True)
+            i = 1
+            while (self.profile.alerts_dir / f"alert_{i:03d}.png").exists():
+                i += 1
+            path = self.profile.alerts_dir / f"alert_{i:03d}.png"
+        elif is_item:
+            i = 1
+            while (self.profile.templates_dir / f"item_{i:03d}.png").exists():
+                i += 1
+            path = self.profile.templates_dir / f"item_{i:03d}.png"
+        else:
+            path = logic.next_mob_template_path(self.profile.templates_dir)
         try:
             logic.save_crop(self.image, box, path)
         except Exception as e:
@@ -503,6 +609,12 @@ class SetupWizard(tk.Toplevel):
         self.session_boxes.append(tuple(box))
         self._redraw_mobs()
         self._refresh_templates()
+        if is_alert:
+            self.info(f"Saved {path.name}. Matching this prompt pauses the bot for you to handle manually.")
+            return
+        if is_item:
+            self.info(f"Saved {path.name}. The bot will look for drops matching this picture.")
+            return
         n = self.ctx.n_mob_templates
         tip = " Add 1-2 more in different poses (walking, turned) for best results." if n < 3 else ""
         self.info(f"Saved {path.name}. You have {n} mob picture{'s' if n != 1 else ''}.{tip}")
@@ -513,6 +625,7 @@ class SetupWizard(tk.Toplevel):
         self._thumbs = []
         paths = self.profile.mob_templates()
         self.ctx.n_mob_templates = len(paths)
+        paths += self.profile.item_templates() + self.profile.alert_templates()
         if not paths:
             ttk.Label(self.thumb_row, text="No mob pictures yet.", foreground="#777777").pack(side="left")
             return
@@ -619,6 +732,7 @@ class SetupWizard(tk.Toplevel):
         ttk.Button(bar, text="Clear HP", command=lambda: self._clear_bar("hp")).pack(side="left", padx=(16, 2))
         ttk.Button(bar, text="Clear MP", command=lambda: self._clear_bar("mp")).pack(side="left", padx=2)
         self._retake_button(bar, self._redraw_bars).pack(side="left", padx=(16, 0))
+        ttk.Button(bar, text="Auto-detect bars", command=lambda: self._auto_regions("bars")).pack(side="left", padx=8)
         self.canvas = ImageCanvas(f, self.canvas_w, self.canvas_h - 40)
         self.canvas.pack()
         self.canvas.mode = "box"
@@ -704,6 +818,31 @@ class SetupWizard(tk.Toplevel):
         self.canvas = ImageCanvas(f, self.canvas_w, max(160, self.canvas_h - 160))
         self.canvas.pack()
         self._redraw_patrol()
+        row = ttk.Frame(f)
+        row.pack(anchor="w", pady=4)
+        ttk.Button(row, text="Choose safe spot", command=self._choose_safe_spot).pack(side="left")
+        ttk.Button(row, text="Clear safe spot", command=self._clear_safe_spot).pack(side="left", padx=8)
+        ttk.Label(row, text="Pick a known platform away from mobs and ledges.").pack(side="left")
+
+    def _choose_safe_spot(self):
+        self.canvas.mode = "click"
+        self.canvas.on_click = self._got_safe_spot
+        self.info("Click the minimap where you want to stop when supplies are low.")
+
+    def _got_safe_spot(self, x, y):
+        try:
+            self.s.calibration.safe_spot = logic.pick_safe_spot(self.s, (x,y))
+        except ValueError as exc:
+            self.error(str(exc))
+            return
+        self.canvas.mode = None
+        self._redraw_patrol()
+        self.info("Safe spot marked in white. Set stock estimates and reserve thresholds in Settings → Safe retreat.")
+
+    def _clear_safe_spot(self):
+        self.s.calibration.safe_spot = None
+        self.canvas.mode = None
+        self._redraw_patrol()
 
     def _edges_typed(self):
         for side, var in (("left", self.left_var), ("right", self.right_var)):
@@ -779,6 +918,11 @@ class SetupWizard(tk.Toplevel):
             log.exception("dot lookup failed")
         if pos is not None:
             ovs.append(("dot", logic.minimap_dot_to_image(c.minimap_box, pos), GREEN))
+        if c.safe_spot is not None:
+            ovs.append(("dot", logic.minimap_dot_to_image(c.minimap_box,c.safe_spot), "#ffffff"))
+        for pl in c.platforms:
+            ovs.append(("polyline", [logic.minimap_dot_to_image(c.minimap_box, point)
+                                     for point in pl["points"]], CYAN))
         self.canvas.overlays = ovs
         m = 6
         self.canvas.show(img, region=[x - m, y - m, w + 2 * m, h + 2 * m], zoom=True)
@@ -790,6 +934,7 @@ class SetupWizard(tk.Toplevel):
         grid.pack(anchor="w", pady=4)
         rows = [("attack", "Attack skill key", False, "The key your attack skill is on, e.g. Ctrl."),
                 ("jump", "Jump key", False, "Your jump key, e.g. Alt."),
+                ("pickup", "Pickup key", True, "Collect drops and mesos; default Z. Empty disables pickup."),
                 ("hp_potion", "HP potion key (optional)", True, "Leave as (none) to not drink HP potions."),
                 ("mp_potion", "MP potion key (recommended)", True,
                  "Magicians run out of MP fast. Set this (and the MP bar in step 7) so the bot drinks MP potions.")]

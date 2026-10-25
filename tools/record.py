@@ -51,9 +51,11 @@ def build_parser() -> argparse.ArgumentParser:
 class KeyLogger:
     """Logs key down/up with timestamps via pynput. Never presses keys."""
 
-    def __init__(self, path: Path, t0: float):
+    def __init__(self, path: Path, t0: float, allowed=None, is_active=None):
         self.path = path
         self.t0 = t0
+        self.allowed = set(allowed) if allowed is not None else None
+        self.is_active = is_active
         self._fh = None
         self._listener = None
         self._lock = threading.Lock()
@@ -71,6 +73,15 @@ class KeyLogger:
     def _event(self, key, down: bool) -> None:
         import json
         name = self._name(key)
+        if self.allowed is not None and name not in self.allowed:
+            return
+        if self.is_active is not None:
+            try:
+                active = bool(self.is_active())
+            except Exception:
+                active = False
+            if not active and (down or name not in self._down):
+                return
         with self._lock:
             if down and name in self._down:       # OS auto-repeat
                 return
@@ -149,7 +160,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     keylog = None
     if args.keys:
         try:
-            keylog = KeyLogger(rec_dir / "keys.jsonl", t0)
+            allowed = {getattr(settings.keys,name) for name in
+                       ("attack","jump","left","right","up","down","hp_potion","mp_potion","pickup")}
+            allowed.discard("")
+            keylog = KeyLogger(rec_dir / "keys.jsonl", t0,allowed,cap.is_foreground)
             keylog.start()
         except Exception as e:      # pynput missing / no permission
             print(f"WARNING: key logging unavailable ({e}); recording frames only.")

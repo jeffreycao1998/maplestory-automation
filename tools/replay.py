@@ -49,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run_pipeline(capture, settings, mob_templates, player_template, logs_dir: Path,
                  stop_on_pause: bool = False, max_frames: Optional[int] = None,
-                 on_decision=None, timeline: Optional[list] = None) -> dict:
+                 on_decision=None, timeline: Optional[list] = None, item_templates=None, alert_templates=None) -> dict:
     """Drive the pipeline over ``capture`` until it ends. Returns the result summary."""
     from maplebot.behavior import Behavior
     from maplebot.controls import Controller, FakeBackend
@@ -59,7 +59,7 @@ def run_pipeline(capture, settings, mob_templates, player_template, logs_dir: Pa
     from maplebot.supervisor import RunLogger, Supervisor
     from maplebot.types import Action, Flag, VerdictKind
 
-    perceiver = Perceiver(settings, list(mob_templates), player_template)
+    perceiver = Perceiver(settings, list(mob_templates), player_template, item_templates, alert_templates, hud_sync=True)
     behavior = Behavior(settings, MapModel.from_settings(settings))
     supervisor = Supervisor(settings)
     # The frames' clock drives everything; key taps must not really sleep.
@@ -123,6 +123,7 @@ def run_pipeline(capture, settings, mob_templates, player_template, logs_dir: Pa
                     timeline.append((now, d.state, d.action.value, d.reason))
     finally:
         controller.release_all()
+        perceiver.close()
         held = sorted(backend.held)
         result = {
             "frames": frames, "stop_reason": stop_reason,
@@ -213,7 +214,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         r = run_pipeline(cap, settings, mob_t, profile.player_template(),
                          logs_root / f"replay_{name}", args.stop_on_pause, args.max_frames,
-                         timeline=timeline)
+                         timeline=timeline, item_templates=profile.item_templates(),
+                         alert_templates=profile.alert_templates())
     except ValueError as e:          # e.g. invalid patrol bounds / key names
         print(f"ERROR: settings problem: {e}")
         return 1

@@ -3,7 +3,12 @@
 Screen-reading training automation for a magician in MapleStory Classic.
 It looks at the game window and presses keys — nothing else.
 
-**Status:** Phase 0 (infrastructure). See [`docs/roadmap.md`](docs/roadmap.md).
+**Status:** screen perception, replay tests, supervised controls and configurable navigation.
+New movement/loot features, safe-spot retreat, prompt/focus stops and optional play timing
+are tested offline; live Classic timing still needs validation.
+See [OCR, Observe mode, ladders, learning and economy](docs/reliability.md),
+[movement and looting setup](docs/navigation.md) and [bulk sprite/map import](docs/assets.md).
+The historical phase checklist is in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Layout
 ```

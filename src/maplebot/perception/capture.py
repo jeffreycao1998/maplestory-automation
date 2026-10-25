@@ -146,6 +146,22 @@ class ScreenCapture:
             log.info("game window moved/resized: %s -> %s", self._box, box)
             self._box = box
 
+    def is_foreground(self) -> bool:
+        """Only the exact matching foreground client area may receive bot key input."""
+        if sys.platform != "win32":
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            user32.GetForegroundWindow.restype = wintypes.HWND
+            foreground = int(user32.GetForegroundWindow() or 0)
+            return any(hwnd == foreground and box == self._box
+                       for hwnd, _, box in _enum_windows(self.window_title))
+        except Exception:
+            log.warning("Cannot verify game foreground window", exc_info=True)
+            return False
+
     def grab(self) -> Frame:
         now = time.monotonic()
         self._refresh_box(now)

@@ -13,6 +13,7 @@ At the end, ``grab()`` raises ``EndOfRecording`` (a ``StopIteration`` subclass, 
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence
 
@@ -69,11 +70,18 @@ class FolderCapture:
         self.folder = Path(folder)
         self.files = list_frames(self.folder)
         self.meta = self._read_meta()
+        recorded_times = fps is None
         if fps is None:
             fps = float(self.meta.get("fps") or 15)
         if fps <= 0:
             raise ValueError("fps must be > 0")
         self.fps = float(fps)
+        self.frame_times = self.meta.get("frame_t") if recorded_times else None
+        if self.frame_times is not None:
+            if (len(self.frame_times)!=len(self.files) or any(not isinstance(t,(float,int)) or
+                not math.isfinite(t) or t<0 for t in self.frame_times) or
+                any(b<=a for a,b in zip(self.frame_times,self.frame_times[1:]))):
+                raise ValueError("Recording frame_t must match frames and increase strictly")
         self.loop = bool(loop)
         self.start_t = float(start_t)
         self.index = 0          # frames returned so far
@@ -101,7 +109,11 @@ class FolderCapture:
             if n == 0 or (not self.loop and self.index >= n) or skipped >= n:
                 raise EndOfRecording(f"end of recording {self.folder}")
             path = self.files[self.index % n]
-            t = self.start_t + self.index / self.fps
+            if self.frame_times:
+                span = self.frame_times[-1]+1/self.fps
+                t = self.start_t+self.frame_times[self.index%n]+(self.index//n)*span
+            else:
+                t = self.start_t + self.index / self.fps
             self.index += 1
             img = read_image(path)
             if img is None:

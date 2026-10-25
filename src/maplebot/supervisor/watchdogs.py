@@ -100,6 +100,12 @@ class Supervisor:
         self._map_error: str = ""
         self._build_map()
         self._stuck_jumps: Deque[float] = deque()
+        self._transit_until = None
+        self._navigation_failed = ""
+        self._retreating = False
+        self._retreat_pause = ""
+        self._stock_unreadable = _Since()
+        self._inventory_pause = ""
 
     # ---- lifecycle ------------------------------------------------------
     def start(self, now: float) -> None:
@@ -118,7 +124,13 @@ class Supervisor:
         for timer in (self._player_lost, self._no_mobs, self._hp_low, self._low_conf,
                       self._hp_unreadable, self._off_platform):
             timer.clear()
+        self._stock_unreadable.clear()
+        self._inventory_pause = ""
         self._stuck_jumps.clear()
+        self._transit_until = None
+        self._navigation_failed = ""
+        self._retreating = False
+        self._retreat_pause = ""
 
     def update_settings(self, settings: Settings) -> None:
         """New thresholds apply from the next check; running timers are kept."""
@@ -128,7 +140,8 @@ class Supervisor:
     def _build_map(self) -> None:
         """The platform watchdog is off when calibration.patrol_y is None."""
         self._map, self._map_error = None, ""
-        if getattr(self.settings.calibration, "patrol_y", None) is None:
+        if (getattr(self.settings.calibration, "patrol_y", None) is None
+                and not self.settings.calibration.platforms):
             return
         try:
             self._map = MapModel.from_settings(self.settings)
@@ -159,6 +172,26 @@ class Supervisor:
             if d is None:
                 return
             state = str(d.state).upper()
+            if state == "INVENTORY_FULL":
+                self._inventory_pause = d.reason
+            if d.retreat_reason:
+                self._retreating = True
+            if state in ("RETREAT_ARRIVED", "RETREAT_FAILED"):
+                self._retreat_pause = d.reason or state
+            if state == "NAV_FAILED":
+                self._navigation_failed = d.reason or "Navigation failed"
+            if state == "NAV_LANDED":
+                self._transit_until = None
+            if state == "NAV_LAUNCH" and self._map is not None and self._transit_until is None:
+                edge = next((e for e in self._map.connections if e.name == d.transition), None)
+                valid = {"jump": (Action.JUMP_UP, Action.JUMP_LEFT, Action.JUMP_RIGHT),
+                         "drop": (Action.DROP_DOWN,), "walk": (Action.WALK_LEFT, Action.WALK_RIGHT),
+                         "climb": (Action.CLIMB_UP,Action.CLIMB_DOWN,Action.GRAB_UP)}
+                if edge is not None and d.action in valid[edge.kind]:
+                    self._transit_until = now + edge.timeout_s
+                else:
+                    self._navigation_failed = "Unrecognised navigation launch"
+
             if state == "STUCK" and d.action == Action.JUMP:
                 self._stuck_jumps.append(now)
         except Exception:  # never let bookkeeping crash the loop
@@ -180,6 +213,7 @@ class Supervisor:
         if self._start_t is None:
             self.start(now)
         s = self.settings.safety
+        stock_unreadable_for = self._stock_unreadable.update(Flag.STOCK_UNREADABLE in p.flags and not self._retreating, now)
 
         # Update every timer each tick, even when latched, so a STOP condition
         # that appears while paused can still upgrade the verdict.
@@ -202,7 +236,8 @@ class Supervisor:
         if self._map is not None and p.player_map is not None:
             x, y = p.player_map
             off_platform_for = self._off_platform.update(
-                not self._map.on_platform(float(x), float(y)), now)
+                not self._map.on_platform(float(x), float(y)) and
+                not (self._transit_until is not None and now < self._transit_until), now)
         elif self._map is not None:
             off_platform_for = self._off_platform.held(now)
         hold_s = self.hp_critical_hold_s
@@ -232,6 +267,21 @@ class Supervisor:
                     "as planned. You can change this limit in the safety settings."))
 
         # -- PAUSE conditions
+        if Flag.VIEW_CHANGED in p.flags:
+            found.append(Verdict(VerdictKind.PAUSE,"Game view size differs from calibration; redo setup"))
+        if self._inventory_pause:
+            found.append(Verdict(VerdictKind.PAUSE,self._inventory_pause))
+        if stock_unreadable_for >= self.settings.ocr.unreadable_pause_s:
+            found.append(Verdict(VerdictKind.PAUSE,"Potion OCR stayed unreadable; check HUD crops before resuming"))
+        if Flag.UNEXPECTED_DIALOG in p.flags or Flag.ALERT_MATCH in p.flags:
+            found.append(Verdict(VerdictKind.PAUSE,
+                "Unexpected dialog/alert detected; handle it manually, then resume"))
+        if self._retreat_pause:
+            found.append(Verdict(VerdictKind.PAUSE, self._retreat_pause))
+        if self._navigation_failed or (self._transit_until is not None and now >= self._transit_until):
+            found.append(Verdict(VerdictKind.PAUSE,
+                self._navigation_failed or "Navigation timed out before landing was confirmed"))
+
         if hp_unreadable_for >= s.hp_unreadable_pause_s:
             found.append(Verdict(
                 VerdictKind.PAUSE,
@@ -267,7 +317,7 @@ class Supervisor:
                 f"{_fmt_duration(window_s)} and jumping didn't free it — it may be "
                 "caught on a rope, ladder or wall. Move it back into the patrol area and "
                 "resume."))
-        if no_mobs_for >= s.no_mobs_pause_s:
+        if no_mobs_for >= s.no_mobs_pause_s and not self._retreating:
             found.append(Verdict(
                 VerdictKind.PAUSE,
                 f"No monsters seen for {_fmt_duration(s.no_mobs_pause_s)} — you may be on a "
