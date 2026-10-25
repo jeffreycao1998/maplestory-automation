@@ -364,3 +364,23 @@ def test_gui_resume_countdown_allows_returning_focus_before_live_input(tmp_path,
     assert any(st.message.startswith('Resuming') and st.countdown_s is not None for st in statuses)
     assert not any('focus' in st.message.lower() for st in statuses)
     assert not backend.held
+
+
+@pytest.mark.parametrize('requested,actual',[(True,True),(True,False),(False,True)])
+def test_window_activation_requires_actual_foreground_verification(monkeypatch,requested,actual):
+    from maplebot.perception import capture
+    import ctypes
+    from types import SimpleNamespace
+    monkeypatch.setattr(capture,'find_client_area',lambda _: (10,20,800,600))
+    cap=capture.ScreenCapture('MapleStory')
+    calls=[]
+    def activate(hwnd):calls.append(hwnd);return requested
+    class Foreground:
+        def __call__(self):return 12 if actual else 13
+    monkeypatch.setattr(capture.sys,'platform','win32')
+    user32=SimpleNamespace(SetForegroundWindow=activate,GetForegroundWindow=Foreground())
+    monkeypatch.setattr(ctypes,'windll',SimpleNamespace(user32=user32),raising=False)
+    monkeypatch.setattr(capture,'_enum_windows',lambda _: [(12,'MapleStory',(10,20,800,600))])
+    assert cap.activate() is actual
+    assert calls==[12]
+    assert 'foreground verified='+str(actual) in cap.focus_details()

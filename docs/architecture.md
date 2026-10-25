@@ -55,6 +55,8 @@ class WindowNotFound(RuntimeError)
 class ScreenCapture:
     def __init__(self, window_title: str)    # finds window on init
     def grab(self) -> Frame                   # re-finds window if it moved
+    def activate(self) -> bool               # normal OS activation, then fresh foreground verification
+    def focus_details(self) -> str           # target game identity/geometry; no unrelated window titles
     def close(self) -> None
 
 # maplebot/perception/perceiver.py   (re-exported from maplebot.perception)
@@ -288,3 +290,21 @@ Live Controller movement can have an independent wall-clock lease. If main-loop
 updates stop while a directional key is held, a daemon watchdog inhibits input and
 releases movement. Closing/context exit terminates the watcher and cannot be undone
 by allow(). A saved reference view size also causes an immediate pause after resize.
+
+
+## Activity diagnostics and foreground activation
+
+The runner emits human-readable reasons and current detection evidence through
+`Status.message`. Its first line is the concise main-window explanation; subsequent
+lines are diagnostic detail. The GUI records every queued status before coalescing
+visual refreshes, so a short-lived pause is retained in the Activity log. The history
+is bounded and repeated details are throttled by `configs/activity.yaml`; lifecycle
+changes (activation, pause, stop, log location) are retained immediately. The runner
+also writes these entries through normal logging to `logs/app.log`.
+
+`ScreenCapture.activate()` uses normal OS window activation, then checks actual
+foreground identity and geometry. The runner attempts this only on Start and explicit
+Resume, before the countdown; Observe only never activates the game. Activation
+failure leaves the countdown available for a manual click. It never bypasses the
+Controller foreground guard or automatically steals focus after a pause. The main
+window's topmost preference applies while stopped so it cannot cover game capture.

@@ -1,0 +1,5 @@
+{
+  "max_lines": 300,
+  "detail_interval_s": 1.0,
+  "repeat_interval_s": 5.0
+}

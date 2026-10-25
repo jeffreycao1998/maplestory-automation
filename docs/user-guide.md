@@ -201,3 +201,27 @@ edge braking, looting and the automatic minimap/bar setup buttons. See
 
 For visible potion/wallet OCR, Observe mode, ladders, movement measurements, real-frame
 reference learning and economy reports, see [reliability.md](reliability.md).
+
+
+## Activity log and focus pauses
+
+Click **Activity log** in the main window to see what the bot is doing. It records
+startup, game activation, detected monsters/drops, player-name detection, decision
+reasons, requested keybinds and pause/stop reasons. **Copy diagnostics** copies the
+recent history and setup summary; paste that text when reporting a problem. **Open
+logs folder** in the activity window opens the persistent files. `logs/app.log` holds
+readable activity, and each run folder contains detailed `ticks.jsonl` records.
+An input request in the log is not proof that the game accepted a key.
+
+If the message says **Game window lost focus or could not be verified**, the bot has
+paused input. On Start and explicit Resume it now tries to bring the game forward,
+then gives you the countdown to click the game if Windows refuses. Return to the game
+and press your pause/resume hotkey (F11 by default); if hotkeys are unavailable, click
+Resume and click the game during the countdown. It does not automatically resume
+when another window loses focus. The log includes the game title filter and selected
+client area so a wrong window or changed geometry can be diagnosed.
+
+**Keep on top when stopped** no longer puts MapleBot over game pixels during a run.
+Opening the activity window or another app while playing can pause input again.
+Close the log, return to the game and resume when ready. Observe only displays
+proposed decisions and never presses keys or activates the game.

@@ -258,3 +258,68 @@ def test_resume_then_stop_never_lifts_the_block(world):
         presses = [e for e in backend.events[n:] if e[2]]
         assert presses == [], f"keys pressed after Stop: {presses}"
         t.join(5)
+
+
+def test_runner_activation_only_on_start_and_explicit_resume(world):
+    from unittest.mock import Mock
+    seq,settings,profile=world
+    cap=SequenceCapture(seq,fps=15,max_frames=4)
+    active=[False]
+    def activate():active[0]=True;return True
+    cap.activate=Mock(side_effect=activate)
+    cap.is_foreground=lambda:active[0]
+    backend=FakeBackend();decisions=[];statuses=[]
+    def decided(d):
+        decisions.append(d)
+        if len(decisions)==1:
+            r.pause();active[0]=False;r.resume()
+        else:r.stop('Done')
+    r=BotRunner(profile,settings,capture=cap,backend=backend,use_hotkeys=False,
+                on_decision=decided,on_status=statuses.append)
+    r.run()
+    assert cap.activate.call_count==2
+    assert len(decisions)==2 and not backend.held
+    assert sum(st.message.startswith('Game focus verified') for st in statuses)>=2
+
+
+def test_focus_loss_never_reactivates_game_without_explicit_resume(world):
+    from unittest.mock import Mock
+    seq,settings,profile=world
+    cap=SequenceCapture(seq,fps=15,max_frames=4)
+    active=[True]
+    cap.activate=Mock(return_value=True)
+    cap.is_foreground=lambda:active[0]
+    cap.focus_details=lambda:'Selected game: MapleStory; foreground verified=False'
+    backend=FakeBackend();statuses=[]
+    def status(st):
+        statuses.append(st)
+        if st.paused:r.stop('Done')
+    r=BotRunner(profile,settings,capture=cap,backend=backend,use_hotkeys=False,
+                on_decision=lambda d:active.__setitem__(0,False),on_status=status)
+    r.run()
+    assert cap.activate.call_count==1
+    assert any(st.paused and 'F11' in st.message and 'foreground verified=False' in st.message for st in statuses)
+    assert not backend.held
+
+
+def test_observe_only_never_activates_game_or_presses_keys(world):
+    from unittest.mock import Mock
+    seq,settings,profile=world
+    cap=SequenceCapture(seq,fps=15,max_frames=3);cap.activate=Mock()
+    backend=FakeBackend();statuses=[]
+    r=BotRunner(profile,settings,capture=cap,backend=backend,use_hotkeys=False,
+                observe_only=True,on_status=statuses.append)
+    r.run()
+    cap.activate.assert_not_called()
+    assert not backend.events
+    assert any('OBSERVE ONLY' in st.message for st in statuses)
+
+
+def test_runner_exposes_decision_evidence_and_logs_it(world,caplog):
+    import logging
+    seq,settings,profile=world
+    r,backend,statuses=_runner(seq,settings,profile,frames=3)
+    with caplog.at_level(logging.INFO,logger='maplebot.runner'):r.run()
+    assert any('mobs detected' in st.message and 'name tag found' in st.message for st in statuses)
+    assert 'Activity:' in caplog.text and 'mobs detected' in caplog.text
+    assert not backend.held

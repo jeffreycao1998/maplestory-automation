@@ -109,6 +109,10 @@ class App:
         self._preview_on = False        # plain mirror of preview_var, safe to read from the worker
         self.wizard = None
         self.settings_win = None
+        self.activity_win = None
+        from maplebot.diagnostics import ActivityJournal
+        self.activity = ActivityJournal()
+        self.activity.append('Ready. Click Start for game input, or Observe only to inspect decisions without keys.')
 
         root.title("MapleBot")
         root.resizable(False, False)
@@ -128,7 +132,7 @@ class App:
         top = ttk.Frame(outer)
         top.pack(fill="x")
         self.ontop_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(top, text="Keep on top", variable=self.ontop_var,
+        ttk.Checkbutton(top, text="Keep on top when stopped", variable=self.ontop_var,
                         command=self._apply_ontop).pack(side="right")
         self.admin_lbl = ttk.Label(top, style="Problem.TLabel", wraplength=300, justify="left")
         self.admin_lbl.pack(side="left")
@@ -207,7 +211,7 @@ class App:
         self.wizard_btn.pack(side="left", expand=True, fill="x", padx=(0, 3))
         self.settings_btn = ttk.Button(brow, text="Settings", command=self.open_settings)
         self.settings_btn.pack(side="left", expand=True, fill="x", padx=3)
-        ttk.Button(brow, text="Open logs folder", command=self.open_logs).pack(
+        ttk.Button(brow, text="Activity log", command=self.open_activity).pack(
             side="left", expand=True, fill="x", padx=(3, 0))
 
         urow = ttk.Frame(outer)
@@ -228,7 +232,7 @@ class App:
     # ---- helpers -----------------------------------------------------------
     def _apply_ontop(self):
         try:
-            self.root.attributes("-topmost", bool(self.ontop_var.get()))
+            self.root.attributes("-topmost", bool(self.ontop_var.get()) and not self.running)
         except self.tk.TclError:
             pass
 
@@ -421,6 +425,7 @@ class App:
             return
         self.thread = threading.Thread(target=self._work, args=(self.runner,), name="bot", daemon=True)
         self.thread.start()
+        self._apply_ontop()  # Let the game cover the app so capture sees the game pixels.
         log.info("bot started")
         self.countdown_lbl.config(text=f"Starting in {int(round(self.settings.safety.start_delay_s))}... "
                                        "click into the game")
@@ -485,6 +490,33 @@ class App:
             return
         from .settings_form import SettingsWindow
         self.settings_win = SettingsWindow(self.root, self.profile, self.settings, on_saved=self._settings_saved)
+
+    def open_activity(self):
+        if self.activity_win is not None and self.activity_win.winfo_exists():
+            self.activity_win.lift();return
+        from .activity import ActivityWindow
+        self.activity_win=ActivityWindow(self.root,self.activity,self.copy_diagnostics,
+                                         self.open_logs,self.settings.safety.pause_hotkey)
+
+    def _record_activity(self,status):
+        line=self.activity.record(status)
+        if line and self.activity_win is not None and self.activity_win.winfo_exists():
+            self.activity_win.append(line)
+
+    def copy_diagnostics(self):
+        keys=self.settings.keys
+        lines=['MapleBot diagnostics',f'Map: {self.profile.current_map_name()}',
+               f'Window title filter: {self.settings.calibration.window_title}',
+               f'Keys: attack={keys.attack}, jump={keys.jump}, left={keys.left}, right={keys.right}',
+               f'Platform: {sys.platform}; administrator={is_admin()}',
+               f'Setup problems: {"; ".join(self._problems()) or "none"}',
+               f'Logs: {self.profile.logs_dir}']
+        if self.runner is not None and self.runner.run_dir:
+            lines.append(f'Current run: {self.runner.run_dir}')
+        lines.extend(['','Recent activity:',self.activity.text()])
+        self.root.clipboard_clear()
+        self.root.clipboard_append('\n'.join(lines))
+        self.msg_lbl.config(text='Diagnostics copied. Paste them when reporting a problem.')
 
     def open_logs(self):
         try:
@@ -581,6 +613,7 @@ class App:
             while True:
                 kind, payload = self.events.get_nowait()
                 if kind == "status":
+                    self._record_activity(payload)
                     last_status = payload
                 elif kind == "error":
                     self._show_error(payload)
@@ -600,7 +633,7 @@ class App:
     def _show_status(self, st):
         for k, v in logic.format_status(st).items():
             if k == "message":
-                self.msg_lbl.config(text=v)
+                self.msg_lbl.config(text=v.split("\n",1)[0])
             elif k in self.vals:
                 self.vals[k].config(text=v)
         self.countdown_lbl.config(text=logic.countdown_text(st))
@@ -649,6 +682,7 @@ class App:
         if self.thread is not None:
             self.thread.join(timeout=0.5)
         self.thread = None
+        self._apply_ontop()
         self._refresh_problems()
         self.root.after(200, self._refresh_buttons)
 
@@ -656,6 +690,10 @@ class App:
         from tkinter import messagebox
         title, text = logic.friendly_error(e)
         self.msg_lbl.config(text=text.split("\n")[0])
+        log.error('%s: %s',title,text)
+        line=self.activity.append(f'ERROR: {title}: {text}')
+        if self.activity_win is not None and self.activity_win.winfo_exists():
+            self.activity_win.append(line)
         if not self._closing:
             messagebox.showerror(title, text, parent=self.root)
 

@@ -65,6 +65,8 @@ class BotRunner:
         self._hotkey_warning = ""
         self.status = Status()
         self.run_dir = None
+        from .diagnostics import ActivityJournal
+        self._activity = ActivityJournal(clock=clock)
 
     # ---- control (any thread) -------------------------------------------
     def pause(self, reason: str = "Paused by you") -> None:
@@ -134,7 +136,7 @@ class BotRunner:
             raise RunnerError(str(e)) from e
 
         enable_dpi_awareness()
-        self._set_status(running=True, paused=False, message="Starting…", hotkeys_ok=True)
+        self._set_status(running=True, paused=False, message="Starting…", hotkeys_ok=True, observe_only=self.observe_only)
 
         capture = self._capture
         own_capture = capture is None
@@ -161,7 +163,14 @@ class BotRunner:
                                            f"hotkeys aren't working ({e}) — use the app's Pause/Stop buttons."
                     self._set_status(hotkeys_ok=False, message=self._hotkey_warning)
 
-            # Countdown so the user can click into the game.
+            if own_capture:
+                from .perception import ScreenCapture, WindowNotFound
+                try:
+                    capture = ScreenCapture(s.calibration.window_title)
+                except WindowNotFound as e:
+                    raise RunnerError(str(e)) from e
+            self._try_focus(capture)
+            # Countdown remains available if Windows refused normal activation.
             end = self._clock() + max(0.0, s.safety.start_delay_s)
             while not self._stop.is_set() and self._clock() < end:
                 left = max(0.0, end - self._clock())
@@ -172,13 +181,6 @@ class BotRunner:
             if self._stop.is_set():
                 stop_reason = self._stop_reason
                 return
-
-            if own_capture:
-                from .perception import ScreenCapture, WindowNotFound
-                try:
-                    capture = ScreenCapture(s.calibration.window_title)
-                except WindowNotFound as e:
-                    raise RunnerError(str(e)) from e
 
             backend = FakeBackend() if self.observe_only else self._backend
             if backend is None:
@@ -201,6 +203,7 @@ class BotRunner:
             except OSError as e:
                 raise RunnerError(f"Can't write run logs to {self.profile.logs_dir}: {e}") from e
             self.run_dir = logger.run_dir
+            self._set_status(message=f"Run logs: {self.run_dir}")
 
             with self._lock:
                 self._controller = controller
@@ -232,6 +235,7 @@ class BotRunner:
                 if resume_now and not paused and not self._stop.is_set():
                     behavior.reset()
                     supervisor.reset(tick_t0 if own_capture else (t_start or 0.0))
+                    self._try_focus(capture)
                     if own_capture:
                         # A GUI Resume click focuses the app. Give the user the same
                         # configured grace period to return to the game as on Start.
@@ -264,6 +268,8 @@ class BotRunner:
                     supervisor.reset(now)
 
                 p = perceiver.perceive(frame)
+                readings=dict(n_mobs=len(p.mobs),map_x=p.player_map[0] if p.player_map else None,
+                              hp=p.hp,mp=p.mp,hp_stock=p.hp_stock,mp_stock=p.mp_stock)
                 economy.observe(p, now)
                 verdict = supervisor.check(p, now)
 
@@ -271,10 +277,14 @@ class BotRunner:
                     controller.inhibit(verdict.reason)
                     logger.log_tick(p, None, verdict)
                     logger.save_frame(frame, verdict.kind.value)
+                    from .diagnostics import perception_summary
+                    reason=verdict.reason+'\n'+perception_summary(p)
+                    self._set_status(**readings,state='SUPERVISOR',action=Action.STOP_WALK.value,
+                                     message=reason)
                     if verdict.kind is VerdictKind.STOP:
                         stop_reason = verdict.reason
                         break
-                    self.pause(verdict.reason)
+                    self.pause(reason)
                     continue
 
                 d = behavior.decide(p, now)
@@ -283,7 +293,13 @@ class BotRunner:
                 except InputBlocked as exc:
                     logger.log_tick(p, None, Verdict(VerdictKind.PAUSE, str(exc)))
                     logger.save_frame(frame, "focus_lost")
-                    self.pause(str(exc))
+                    details=getattr(capture,'focus_details',lambda:'Game foreground could not be verified')()
+                    hint=(f'Click the game, then press {s.safety.pause_hotkey.upper()} to resume.' if self.status.hotkeys_ok
+                          else 'Click Resume in the app, then click the game during the countdown.')
+                    reason=f'{exc}. {hint}\n{details}'
+                    self.pause(reason)
+                    self._set_status(**readings,action=Action.STOP_WALK.value)
+
                     continue
                 if controller.inhibited and not self.paused and not self._stop.is_set():
                     reason = controller.inhibit_reason or "Input was inhibited"
@@ -291,6 +307,8 @@ class BotRunner:
                     logger.save_frame(frame,"input_stall")
                     self.pause(reason)
                     continue
+                if controller.inhibited:
+                    continue  # Pause/Stop won the race: no action was delivered.
                 supervisor.note_decision(d, now)
                 logger.log_tick(p, d, verdict)
                 if d.state == "STUCK":
@@ -310,15 +328,17 @@ class BotRunner:
                 inst = 1.0 / max(elapsed, period, 1e-3)
                 fps = inst if fps == 0 else fps * 0.9 + inst * 0.1
                 ledger = economy.summary(now)
-                self._set_status(wallet_delta=ledger["wallet_delta"],net_per_hour=ledger["net_per_hour"],
-                                 state=d.state, action=d.action.value, n_mobs=len(p.mobs),
-                                 map_x=p.player_map[0] if p.player_map else None,
-                                 hp=p.hp, mp=p.mp, fps=fps, attacks=attacks,
-                                 hp_stock=p.hp_stock,mp_stock=p.mp_stock,
-                                 hp_pots_estimated=behavior.potion_estimates[0],
-                                 mp_pots_estimated=behavior.potion_estimates[1],
-                                 message=d.retreat_reason or self._running_message(),
-                                 runtime_s=now - t_start)
+                with self._lock:
+                    if not self._paused and not self._stop.is_set():
+                        self._set_status(wallet_delta=ledger["wallet_delta"],net_per_hour=ledger["net_per_hour"],
+                                         state=d.state, action=d.action.value, n_mobs=len(p.mobs),
+                                         map_x=p.player_map[0] if p.player_map else None,
+                                         hp=p.hp, mp=p.mp, fps=fps, attacks=attacks,
+                                         hp_stock=p.hp_stock,mp_stock=p.mp_stock,
+                                         hp_pots_estimated=behavior.potion_estimates[0],
+                                         mp_pots_estimated=behavior.potion_estimates[1],
+                                         message=self._decision_message(p,d),
+                                         runtime_s=now - t_start)
 
                 if (self._on_preview and s.debug_preview
                         and (tick_t0 - last_preview) >= PREVIEW_INTERVAL_S):
@@ -370,6 +390,23 @@ class BotRunner:
                              message=stop_reason or self._stop_reason)
 
     # ---- helpers ------------------------------------------------------------
+    def _try_focus(self,capture):
+        if self.observe_only or self.paused or self._stop.is_set():return
+        activate=getattr(capture,'activate',None)
+        if not callable(activate):return
+        try:
+            verified=bool(activate())
+            details=getattr(capture,'focus_details',lambda:'')()
+        except Exception:
+            log.warning('Game activation failed',exc_info=True)
+            verified=False;details='Game activation unavailable'
+        self._set_status(message=('Game focus verified' if verified else
+                         'Windows did not activate the game. Click the game during the countdown.')+'\n'+details)
+
+    def _decision_message(self,p,d):
+        from .diagnostics import decision_message
+        return decision_message(p,d,self.settings,self.observe_only)
+
     def _running_message(self) -> str:
         return ("OBSERVE ONLY — no game input" if self.observe_only else "Running") + (f" — {self._hotkey_warning}" if self._hotkey_warning else "")
 
@@ -384,6 +421,8 @@ class BotRunner:
             for k, v in changes.items():
                 setattr(self.status, k, v)
             snapshot = Status(**vars(self.status))
+            line=self._activity.record(snapshot)
+            if line:log.info('Activity: %s',line)
         if self._on_status:
             try:
                 self._on_status(snapshot)

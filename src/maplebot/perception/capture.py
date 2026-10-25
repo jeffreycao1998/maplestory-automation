@@ -162,6 +162,43 @@ class ScreenCapture:
             log.warning("Cannot verify game foreground window", exc_info=True)
             return False
 
+    def activate(self) -> bool:
+        """Try ordinary OS activation after Start/Resume, then verify actual focus.
+
+        Never called automatically after focus loss. Windows may refuse activation;
+        the caller then leaves the user time to click the game manually.
+        """
+        if sys.platform != 'win32':
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+            matches=_enum_windows(self.window_title)
+            if not matches:return False
+            hwnd,title,box=max(matches,key=lambda row:row[2][2]*row[2][3])
+            self._box=box
+            self._last_check=time.monotonic()
+            activate=ctypes.windll.user32.SetForegroundWindow
+            activate.argtypes=[wintypes.HWND]
+            activate.restype=wintypes.BOOL
+            activate(hwnd)
+            verified=self.is_foreground()
+            log.info('Game activation: %s; verified=%s',title,verified)
+            return verified
+        except Exception:
+            log.warning('Could not bring game to foreground',exc_info=True)
+            return False
+
+    def focus_details(self) -> str:
+        """Explain target selection without recording unrelated application titles."""
+        try:
+            matches=_enum_windows(self.window_title) if sys.platform=='win32' else []
+            selected=[(hwnd,title) for hwnd,title,box in matches if box==self._box]
+            return (f'Window filter={self.window_title!r}; selected={selected}; '
+                    f'client area={self._box}; foreground verified={self.is_foreground()}')
+        except Exception:
+            return f'Window filter={self.window_title!r}; foreground verification unavailable'
+
     def grab(self) -> Frame:
         now = time.monotonic()
         self._refresh_box(now)
