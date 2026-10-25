@@ -128,3 +128,93 @@ def test_map_errors_from_profile(tmp_path):
     with pytest.raises(MapError) as e:
         p.create_map("pig beach")
     assert L.friendly_error(e.value)[0] == "Map"
+
+
+def _downloaded_only(profile):
+    """The wizard's default download path stores no top-level mob_*.png crops."""
+    import hashlib
+    import json
+    from maplebot.app import sprite_library as S
+    settings = _set_up(profile)
+    (profile.templates_dir / 'mob_1.png').unlink()
+    pack = profile.root / 'test-pack'
+    pack.mkdir(exist_ok=True)
+    name = 'mob_library_7_move_0.png'
+    data = b'fixture-sprite'
+    (pack / name).write_bytes(data)
+    config = json.loads(S.SOURCE_CONFIG.read_text())
+    manifest = {'source_game': 'MapleStory Classic World',
+                'source_client_build': config['classic_client_build'],
+                'source_snapshot': config['classic_snapshot'],
+                'entries': [{'kind': 'mob', 'file': name, 'sha256': hashlib.sha256(data).hexdigest()}]}
+    (pack / 'manifest.json').write_text(json.dumps(manifest))
+    S.install_pack(pack, profile.templates_dir)
+    return settings
+
+
+def test_downloaded_sprites_complete_map_setup_without_manual_crops(tmp_path):
+    profile = Profile(tmp_path)
+    settings = _downloaded_only(profile)
+    assert settings.problems() == []
+    assert not list(profile.templates_dir.glob('mob_*.png'))
+    assert profile.mob_templates()
+    assert profile.map_is_set_up()
+    text, enabled, action = L.start_state([], profile.map_is_set_up(), False, settings)
+    assert text.startswith('Start') and enabled and action == 'start'
+
+
+def test_downloaded_map_readiness_checks_requested_map_not_current_map(tmp_path):
+    profile = Profile(tmp_path)
+    settings = _downloaded_only(profile)
+    original = profile.current_map
+    profile.create_map('Another map')
+    # A minimap alone does not inherit the other map's downloaded monsters.
+    other = profile.load()
+    other.calibration.minimap_box = settings.calibration.minimap_box
+    profile.save(other)
+    assert not profile.map_is_set_up()
+    assert profile.map_is_set_up(original)
+    choices = dict(L.map_choices(profile.maps(), profile.current_map,
+                                 profile.current_map_name(), profile.map_is_set_up))
+    assert not choices[original].endswith(L.NOT_SET_UP)
+    assert choices[profile.current_map].endswith(L.NOT_SET_UP)
+
+
+@pytest.mark.parametrize('damage', ['missing', 'legacy', 'corrupt'])
+def test_unusable_downloaded_banks_do_not_complete_setup(tmp_path, damage):
+    import json
+    profile = Profile(tmp_path)
+    _downloaded_only(profile)
+    pointer = profile.templates_dir / 'sprite-library.json'
+    manifest = json.loads(pointer.read_text())
+    if damage == 'missing':
+        (profile.templates_dir / '.sprite-banks' / manifest['bank'] / manifest['entries'][0]['file']).unlink()
+    elif damage == 'legacy':
+        manifest['source_game'] = 'GMS v83'
+        pointer.write_text(json.dumps(manifest))
+    else:
+        pointer.write_text('invalid json')
+    assert not profile.map_is_set_up()
+
+
+def test_wizard_save_callback_exposes_enabled_start_for_downloaded_only_map(tmp_path):
+    from unittest.mock import Mock
+    from maplebot.app.gui import App
+    profile = Profile(tmp_path)
+    settings = _downloaded_only(profile)
+    app = App.__new__(App)
+    app.profile = profile
+    app.thread = None
+    app.runner = None
+    app._updating = False
+    for name in ('start_btn', 'observe_btn', 'map_combo', 'new_map_btn', 'rename_map_btn',
+                 'delete_map_btn', 'pause_btn', 'stop_btn', 'wizard_btn', 'settings_btn',
+                 'update_btn', 'problems_lbl'):
+        setattr(app, name, Mock())
+    app._settings_saved(settings)
+    assert app._start_action == 'start'
+    app.start_btn.config.assert_called_with(text=L.start_button_text(settings))
+    app.start_btn.state.assert_called_with(['!disabled'])
+    app.observe_btn.state.assert_called_with(['!disabled'])
+    app.problems_lbl.config.assert_called_with(text='')
+    assert app.thread is None  # Saving does not start input automatically.

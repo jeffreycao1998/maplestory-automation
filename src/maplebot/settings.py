@@ -438,10 +438,11 @@ class Profile:
             raise MapError('Map reference image is missing or changed. Download and align the map again.')
         return dict(ref,path=str(path))
 
-    def library_templates(self, kind: str) -> List[Path]:
-        """Only the atomically published bank is active; old banks/manual crops coexist."""
+    def library_templates(self, kind: str, map_id: Optional[str] = None) -> List[Path]:
+        """Read a map's published bank (current map by default); ignore old banks."""
         import re
-        record = self.templates_dir / "sprite-library.json"
+        templates = self.map_dir(map_id) / "templates"
+        record = templates / "sprite-library.json"
         if not record.is_file():
             return []
         try:
@@ -452,7 +453,7 @@ class Profile:
             bank_id = value["bank"]
             if not re.fullmatch(r"[0-9a-f]{32}", bank_id):
                 return []
-            bank = self.templates_dir / ".sprite-banks" / bank_id
+            bank = templates / ".sprite-banks" / bank_id
             return [bank / row["file"] for row in value["entries"]
                     if row.get("kind") == kind and re.fullmatch(
                         rf"{kind}_library_[0-9]+_[a-z0-9]+_[0-9]+\.png", row["file"])
@@ -547,9 +548,11 @@ class Profile:
         return dict(self.maps()).get(self.current_map, DEFAULT_MAP_NAME)
 
     def map_is_set_up(self, map_id: Optional[str] = None) -> bool:
+        """Recognize both manual mob crops and compatible downloaded sprite banks."""
         d = self.map_dir(map_id)
         cal = self._read(d / "map.yaml").get("calibration") or {}
-        return bool(cal.get("minimap_box")) and any((d / "templates").glob("mob_*.png"))
+        return bool(cal.get("minimap_box")) and (
+            any((d / "templates").glob("mob_*.png")) or bool(self.library_templates("mob", map_id)))
 
     def switch_map(self, map_id: str) -> None:
         if not (self.maps_dir / map_id).is_dir():
